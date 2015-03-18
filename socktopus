@@ -1,0 +1,167 @@
+#!/usr/bin/env perl
+
+use strict;
+use warnings;
+
+use v5.14;
+
+use URI;
+use IO::Select;
+use IO::Socket::INET;
+
+require 'sysexits.ph';
+
+use Data::Dumper;
+
+my @uri;
+foreach my $a (@ARGV) {
+	my $u = URI->new($a);
+
+	unless (defined($u) && $u->scheme ~~ [ 'tcp' ]) {
+		print STDERR "'$a' is not a supported URI endpoints\n";
+		exit &EX_USAGE;
+	}
+
+	push @uri, $u;
+}
+
+my $sel = IO::Select->new;
+
+my (%udp, %tcp);
+
+my $sock = -1;
+if (scalar(@uri) > 0) {
+	print "running in active mode\n";
+
+	unless (defined($ENV{'UDPLOC'}) 
+			&& $ENV{'UDPLOC'} =~ /^(?<sport>[0-9]+):(?<laddr>.*)?:(?<lport>[0-9]+)$/
+			&& $+{sport} < 65536 && $+{lport} < 65536) {
+		print STDERR "env UDPLOC not set correctly (sport:[laddr]:lport)\n";
+		exit &EX_USAGE;
+	}
+	my $sport = $+{sport};
+	my $loc = ( $+{laddr} || 'localhost' ) . ":$+{lport}";
+
+	unless (defined($ENV{'UDPREM'}) 
+			&& $ENV{'UDPREM'} =~ /^(?<dport>[0-9]+):(?<raddr>.*)?:(?<rport>[0-9]+)$/
+			&& $+{dport} < 65536 && $+{rport} < 65536) {
+		print STDERR "env UDPREM not set correctly (dport:[raddr]:rport)\n";
+		exit &EX_USAGE;
+	}
+	my $dport = $+{dport};
+	my $rem = ( $+{raddr} || 'localhost' ) . ":$+{rport}";
+
+	print STDERR "only passing in a single URI, a little strange, but okay...\n"
+		unless (scalar(@uri) > 1);
+
+	unless ($uri[0]->scheme eq 'tcp') {
+		print STDERR "first URI ('$uri[0]') must be a TCP socket\n";
+		exit &EX_USAGE;
+	}
+
+	my $u = IO::Socket::INET->new(
+		LocalPort	=> $sport,
+		Proto		=> 'udp',
+		Blocking	=> 0,
+	) or die "unable to bind() on $sport/udp: $@\n";
+
+	$udp{$u->fileno} = 1;
+	$sel->add($u);
+	$map{$u} = [ ];
+} else {
+	print "running in passive mode\n";
+
+	my $port = $ENV{'PORT'} || 23461;
+	unless ($port =~ /^[0-9]+$/ && $port < 65536) {
+		print STDERR "env PORT not set to a suitable TCP port number\n";
+		exit &EX_USAGE;
+	}
+
+	$sock = IO::Socket::INET->new(
+		Listen		=> 5,
+		LocalPort	=> $port,
+		Proto		=> 'tcp',
+		Blocking	=> 0,
+	) or die "unable to bind() on $port/tcp: $@\n";
+
+	$sel->add($sock);
+}
+
+my $running = 1;
+while ($running) {
+	my ($r, undef, $e) = IO::Select::select($sel, undef, $sel);
+	foreach my $fh (@$e) {
+		if (defined($tcp{$fh->fileno})) {
+			my $c = recv $fh, undef, 0 ,0;
+			print STDERR "socket ${fh->file} exception: $c";
+
+			delete $tcp{$fh->fileno};
+			$sel->remove($fh);
+			$fh->close;
+		}
+	}
+
+	foreach my $fh (@$r) {
+		if ($fh == $sock) {
+			my $c = $fh->accept;
+			$tcp{$c->fileno} = -1;
+			$sel->add($c);
+		}
+
+		if (defined($udp{$fh->fileno})) {
+			&fwd($fh);
+		}
+
+		if (defined($tcp{$fh->fileno})) {
+			recv $fh, my $buffer, 10000, 0;
+			continue
+				if (length($buffer) == 0);
+
+			unless ($buffer =~ /^(?<dport>[0-9]+):(?<raddr>.*)?:(?<rport>[0-9]+)(?:[\w]+(?<token>.+))?$/
+					&& $+{dport} < 65536 && $+{rport} < 65536) {
+				delete $tcp{$c->fileno};
+				$sel->close($fh);
+				continue;
+			}
+
+			my $dport = $+{dport};
+			my $rem = ( $+{raddr} || 'localhost' ) . ":$+{rport}";
+		}
+	}
+}
+
+exit &EX_OK;
+
+sub fwd($) {
+	my $fh = shift;
+}
+
+BEGIN {
+
+# http://www.perlmonks.org/?node_id=581062
+{
+	package NBCSocket;
+	use IO::Socket::INET;
+	use Errno;
+	use Carp;
+	our @ISA = 'IO::Socket::INET';
+	sub connect {
+		@_ == 2 or croak 'usage: $sock->connect(NAME)';
+		my $sock = shift;
+		my $addr = shift;
+		my $timeout = ${*$sock}{'io_socket_timeout'};
+		my $err;
+		my $blocking;
+		$blocking = $sock->blocking(0);
+		if (!connect($sock, $addr)) {
+			if (!$!{EINPROGRESS}) {
+				$err = $!;
+				$@ = "connect: $!";
+			}
+		}
+		$! = $err if $err;
+		$err ? undef : $sock;
+	}
+}
+
+}
