@@ -19,7 +19,6 @@ Anyone finding they are hitting a choke point between their endpoints whilst try
 
  * [Perl 5.14 or higher](https://www.perl.org/)
  * [URI](http://search.cpan.org/~ether/URI/lib/URI.pm)
- * [AnyEvent](http://software.schmorp.de/pkg/AnyEvent.html)
 
 Start off by fetching the source:
 
@@ -28,8 +27,7 @@ Start off by fetching the source:
 ## Debian (wheezy/squeeze)
 
     sudo apt-get update
-    sudo apt-get install -yy --no-install-recommends perl liburi-perl libanyevent-perl cpanminus
-    sudo cpanm AnyEvent::Handle::UDP
+    sudo apt-get install -yy --no-install-recommends perl liburi-perl
 
 # Usage
 
