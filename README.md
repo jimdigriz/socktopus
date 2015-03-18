@@ -24,7 +24,7 @@ Start off by fetching the source:
 
     git clone https://github.com/jimdigriz/socktopus.git
 
-## Debian (wheezy/squeeze)
+## Debian 'wheezy' 7.x
 
     sudo apt-get update
     sudo apt-get install -yy --no-install-recommends perl liburi-perl
