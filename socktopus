@@ -96,6 +96,8 @@ if (scalar(@uri) > 0) {
 	$sel_rd->add($sock);
 }
 
+# TODO handle SIGCHLD as the fork's exit
+
 my $running = 1;
 while ($running) {
 	my ($r, undef, $e) = IO::Select::select($sel_rd, undef, $sel_ex);
@@ -118,12 +120,12 @@ while ($running) {
 			my $c = $fh->accept;
 			$sel_rd->add($c);
 			$sel_ex->add($c);
-			continue;
+			next;
 		}
 
 		if (defined($map{$fh->fileno})) {
 			&fwd($fh);
-			continue;
+			next;
 		}
 
 		if ($fh->fileno ~~ [ map { $_->fileno } $sel_ex->handles ]) {
@@ -132,7 +134,7 @@ while ($running) {
 				$sel_rd->remove($fh);
 				$sel_ex->remove($fh);
 				$fh->close;
-				continue;
+				next;
 			}
 
 			unless ($buffer =~ /^SOCKTOPUS:0:CONNECT (?<dport>[0-9]+):(?<raddr>.*)?:(?<rport>[0-9]+)(?:[\w]+(?<token>.+))?$/
@@ -143,7 +145,7 @@ while ($running) {
 				send $fh, "SOCKTOPUS:0:ERROR\n", 0;
 				$fh->close;
 
-				continue;
+				next;
 			}
 
 			my $raddr = $+{raddr} || 'localhost';
@@ -160,18 +162,18 @@ while ($running) {
 				$sel_rd->add($u);
 			} else {
 				foreach my $k (keys %map) {
-					continue unless ($map{$k}{sock}->sockport == $+{dport}
+					next unless ($map{$k}{sock}->sockport == $+{dport}
 							&& $map{$k}{raddr} eq $+{raddr}
 							&& $map{$k}{sock}->peerport == $+{rport});
 
 					unless ($map{$k}{guid} eq $+{token}) {
 						print $fh "SOCKTOPUS:0:ERROR bad token\n";
 						print STDERR "bad token\n";
-						break;
+						last;
 					}
 
 					$u = $map{$k};
-					break;
+					last;
 				}
 
 				unless (defined($u)) {
@@ -179,7 +181,7 @@ while ($running) {
 					$sel_rd->remove($fh);
 					$sel_ex->remove($fh);
 					$fh->close;
-					continue;
+					next;
 				}
 			}
 
