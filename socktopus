@@ -44,6 +44,23 @@ if (scalar(@uri) > 0) {
 		exit &EX_USAGE;
 	}
 
+	my $laddr = $+{laddr} || 'localhost';
+	my $u = IO::Socket::INET->new(
+		LocalPort	=> $+{sport},
+		PeerAddr	=> $laddr,
+		PeerPort	=> $+{lport},
+		Proto		=> 'udp',
+		Blocking	=> 0,
+	);
+	unless (defined($u)) {
+		print STDERR "unable to bind() on $+{sport}/udp: $@\n";
+		exit &EX_OSERR;
+	}
+
+	$map{$u->fileno} = { sock => $u, laddr => $laddr, guid => Data::GUID->new->as_string, feeds => [ ], order => [ ] };
+
+	$sel_rd->add($u);
+
 	unless (defined($ENV{'UDPREM'}) 
 			&& $ENV{'UDPREM'} =~ /^(?<dport>[0-9]+):(?<raddr>.*)?:(?<rport>[0-9]+)$/
 			&& $+{dport} < 65536 && $+{rport} < 65536) {
@@ -60,19 +77,6 @@ if (scalar(@uri) > 0) {
 		print STDERR "first URI ('$uri[0]') must be a TCP socket\n";
 		exit &EX_USAGE;
 	}
-
-	my $raddr = $+{raddr} || 'localhost';
-	my $u = IO::Socket::INET->new(
-		LocalPort	=> $+{dport},
-		PeerAddr	=> $raddr,
-		PeerPort	=> $+{rport},
-		Proto		=> 'udp',
-		Blocking	=> 0,
-	) or die "unable to bind() on $+{dport}/udp: $@\n";
-
-	$map{$u->fileno} = { sock => $u, raddr => $raddr, guid => Data::GUID->new->as_string, feeds => [ ], order => [ ] };
-
-	$sel_rd->add($u);
 } else {
 	print "running in passive mode\n";
 
