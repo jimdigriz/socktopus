@@ -136,8 +136,8 @@ while ($running) {
 	my ($r, undef, $e) = IO::Select::select($sel_rd, undef, $sel_ex);
 
 	foreach my $fh (@$e) {
-		my $c = recv $fh, undef, 0 ,0;
-		print STDERR "socket ${fh->file} exception: $c";
+		recv $fh, undef, 0 ,0;
+		print STDERR "socket ${fh->file} exception: $!";
 
 		$sel_rd->remove($fh);
 		$sel_ex->remove($fh);
@@ -162,15 +162,15 @@ while ($running) {
 		}
 
 		if ($fh->fileno ~~ [ map { $_->fileno } $sel_ex->handles ]) {
-			recv $fh, my $buffer, 1000, 0;
-			if (length($buffer) == 0) {
+			my $buffer;
+			unless (defined(recv $fh, $buffer, 1000, 0) && length($buffer) > 0) {
 				$sel_rd->remove($fh);
 				$sel_ex->remove($fh);
 				$fh->close;
 				next;
 			}
 
-			unless ($buffer =~ /^SOCKTOPUS:0:CONNECT (?<dport>[0-9]+):(?<raddr>.*)?:(?<rport>[0-9]+)(?:[\w]+(?<token>.+))?$/
+			unless ($buffer =~ /^SOCKTOPUS:0:CONNECT\s+(?<dport>[0-9]+):(?<raddr>.*)?:(?<rport>[0-9]+)(?:\s+(?<token>.+))?$/
 					&& $+{dport} < 65536 && $+{rport} < 65536) {
 				$sel_rd->remove($fh);
 				$sel_ex->remove($fh);
@@ -189,6 +189,16 @@ while ($running) {
 				Proto		=> 'udp',
 			);
 			if (defined($u)) {
+				if ($u->sockhost eq $u->peerhost && $u->sockport == $u->peerport) {
+					send $fh, "SOCKTOPUS:0:ERROR loop requested\n", O_NONBLOCK;
+					print STDERR "loop detected!\n";
+					$sel_rd->remove($fh);
+					$sel_ex->remove($fh);
+					$u->close;
+					$fh->close;
+					next;
+				}
+
 				$map{$u->fileno} = {
 					sock	=> $u,
 					addr	=> $raddr,
@@ -211,7 +221,7 @@ while ($running) {
 						last;
 					}
 
-					$u = $map{$k};
+					$u = $map{$k}{sock};
 					last;
 				}
 
@@ -248,9 +258,13 @@ while ($running) {
 exit &EX_OK;
 
 sub fwd($) {
-	my $fh = shift;
+	my $u = shift;
 
-	recv $fh, my $buffer, 10000, 0;
+	my $buffer;
+
+	unless (defined(recv $u, $buffer, 10000, 0) && length($buffer) > 0) {
+		
+	}
 }
 
 sub child($$) {
@@ -262,9 +276,9 @@ sub child($$) {
 	my $length = -1;
 	while (1) {
 		if ($length == -1) {
-			recv $tcp, my $l, 4, 0;
-			unless (length($l) == 4) {
-				print STDERR "did not read in four bytes\n";
+			my $l;
+			unless (defined(recv $tcp, $l, 4, 0) && length($l) == 4) {
+				print STDERR "did not read in four bytes: $!\n";
 				last;
 			}
 
@@ -275,8 +289,8 @@ sub child($$) {
 			}
 		}
 
-		recv $tcp, my $b, $length - length($buffer), 0;
-		last if (length($b) == 0);
+		my $b;
+		last unless (defined(recv $tcp, $b, $length - length($buffer), 0) && length($b) > 0);
 
 		$buffer .= $b;
 		next if (length($buffer) < $length);
