@@ -8,6 +8,7 @@ use v5.14;
 use URI;
 use IO::Select;
 use IO::Socket::INET;
+use Data::GUID;
 
 require 'sysexits.ph';
 
@@ -25,9 +26,12 @@ foreach my $a (@ARGV) {
 	push @uri, $u;
 }
 
-my $sel = IO::Select->new;
+my %map;
 
-my (%udp, %tcp);
+# UDP sockets and *initiating* TCP sockets in here
+my $sel_rd = IO::Select->new;
+# just TCP sockets in here
+my $sel_ex = IO::Select->new;
 
 my $sock = -1;
 if (scalar(@uri) > 0) {
@@ -39,8 +43,6 @@ if (scalar(@uri) > 0) {
 		print STDERR "env UDPLOC not set correctly (sport:[laddr]:lport)\n";
 		exit &EX_USAGE;
 	}
-	my $sport = $+{sport};
-	my $loc = ( $+{laddr} || 'localhost' ) . ":$+{lport}";
 
 	unless (defined($ENV{'UDPREM'}) 
 			&& $ENV{'UDPREM'} =~ /^(?<dport>[0-9]+):(?<raddr>.*)?:(?<rport>[0-9]+)$/
@@ -59,15 +61,18 @@ if (scalar(@uri) > 0) {
 		exit &EX_USAGE;
 	}
 
+	my $raddr = $+{raddr} || 'localhost';
 	my $u = IO::Socket::INET->new(
-		LocalPort	=> $sport,
+		LocalPort	=> $+{dport},
+		PeerAddr	=> $raddr,
+		PeerPort	=> $+{rport},
 		Proto		=> 'udp',
 		Blocking	=> 0,
-	) or die "unable to bind() on $sport/udp: $@\n";
+	) or die "unable to bind() on $+{dport}/udp: $@\n";
 
-	$udp{$u->fileno} = 1;
-	$sel->add($u);
-	$map{$u} = [ ];
+	$map{$u->fileno} = { sock => $u, raddr => $raddr, guid => Data::GUID->new->as_string, feeds => [ ], order => [ ] };
+
+	$sel_rd->add($u);
 } else {
 	print "running in passive mode\n";
 
@@ -84,48 +89,103 @@ if (scalar(@uri) > 0) {
 		Blocking	=> 0,
 	) or die "unable to bind() on $port/tcp: $@\n";
 
-	$sel->add($sock);
+	$sel_rd->add($sock);
 }
 
 my $running = 1;
 while ($running) {
-	my ($r, undef, $e) = IO::Select::select($sel, undef, $sel);
-	foreach my $fh (@$e) {
-		if (defined($tcp{$fh->fileno})) {
-			my $c = recv $fh, undef, 0 ,0;
-			print STDERR "socket ${fh->file} exception: $c";
+	my ($r, undef, $e) = IO::Select::select($sel_rd, undef, $sel_ex);
 
-			delete $tcp{$fh->fileno};
-			$sel->remove($fh);
-			$fh->close;
-		}
+	foreach my $fh (@$e) {
+		my $c = recv $fh, undef, 0 ,0;
+		print STDERR "socket ${fh->file} exception: $c";
+
+		$sel_rd->remove($fh);
+		$sel_ex->remove($fh);
+
+		# TODO
+		# kill forks using this socket
+
+		$fh->close;
 	}
 
 	foreach my $fh (@$r) {
 		if ($fh == $sock) {
 			my $c = $fh->accept;
-			$tcp{$c->fileno} = -1;
-			$sel->add($c);
+			$sel_rd->add($c);
+			$sel_ex->add($c);
+			continue;
 		}
 
-		if (defined($udp{$fh->fileno})) {
+		if (defined($map{$fh->fileno})) {
 			&fwd($fh);
+			continue;
 		}
 
-		if (defined($tcp{$fh->fileno})) {
+		if ($fh->fileno ~~ [ map { $_->fileno } $sel_ex->handles ]) {
 			recv $fh, my $buffer, 10000, 0;
-			continue
-				if (length($buffer) == 0);
-
-			unless ($buffer =~ /^(?<dport>[0-9]+):(?<raddr>.*)?:(?<rport>[0-9]+)(?:[\w]+(?<token>.+))?$/
-					&& $+{dport} < 65536 && $+{rport} < 65536) {
-				delete $tcp{$c->fileno};
-				$sel->close($fh);
+			if (length($buffer) == 0) {
+				$sel_rd->remove($fh);
+				$sel_ex->remove($fh);
+				$fh->close;
 				continue;
 			}
 
-			my $dport = $+{dport};
-			my $rem = ( $+{raddr} || 'localhost' ) . ":$+{rport}";
+			unless ($buffer =~ /^SOCKTOPUS:0:CONNECT (?<dport>[0-9]+):(?<raddr>.*)?:(?<rport>[0-9]+)(?:[\w]+(?<token>.+))?$/
+					&& $+{dport} < 65536 && $+{rport} < 65536) {
+				$sel_rd->remove($fh);
+				$sel_ex->remove($fh);
+
+				send $fh, "SOCKTOPUS:0:ERROR\n", 0;
+				$fh->close;
+
+				continue;
+			}
+
+			my $raddr = $+{raddr} || 'localhost';
+			my $u = IO::Socket::INET->new(
+				LocalPort	=> $+{dport},
+				PeerAddr	=> $raddr,
+				PeerPort	=> $+{rport},
+				Proto		=> 'udp',
+				Blocking	=> 0,
+			);
+			if (defined($u)) {
+				$map{$u->fileno} = { sock => $u, raddr => $raddr, guid => Data::GUID->new->as_string, feeds => [ ], order => [ ] };
+
+				$sel_rd->add($u);
+			} else {
+				foreach my $k (keys %map) {
+					continue unless ($map{$k}{sock}->sockport == $+{dport}
+							&& $map{$k}{raddr} eq $+{raddr}
+							&& $map{$k}{sock}->peerport == $+{rport});
+
+					unless ($map{$k}{guid} eq $+{token}) {
+						print $fh "SOCKTOPUS:0:ERROR bad token\n";
+						print STDERR "bad token\n";
+						break;
+					}
+
+					$u = $map{$k};
+					break;
+				}
+
+				unless (defined($u)) {
+					print STDERR "unable to bind $+{rport}/udp: $@\n";
+					$sel_rd->remove($fh);
+					$sel_ex->remove($fh);
+					$fh->close;
+					continue;
+				}
+			}
+
+			push @{$map{$u->fileno}{feeds}}, $fh;
+
+			$sel_rd->remove($fh);
+
+			print $fh "SOCKTOPUS:0:OK $map{$u->fileno}{guid}\n";
+
+			# FORK
 		}
 	}
 }

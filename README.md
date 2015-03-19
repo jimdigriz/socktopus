@@ -19,6 +19,7 @@ Anyone finding they are hitting a choke point between their endpoints whilst try
 
  * [Perl 5.14 or higher](https://www.perl.org/)
  * [URI](http://search.cpan.org/~ether/URI/lib/URI.pm)
+ * [Data::GUID](http://search.cpan.org/~rjbs/Data-GUID/lib/Data/GUID.pm)
 
 Start off by fetching the source:
 
@@ -27,7 +28,7 @@ Start off by fetching the source:
 ## Debian 'wheezy' 7.x
 
     sudo apt-get update
-    sudo apt-get install -yy --no-install-recommends perl liburi-perl
+    sudo apt-get install -yy --no-install-recommends perl liburi-perl libdata-guid-perl
 
 # Usage
 
