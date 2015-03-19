@@ -9,6 +9,8 @@ use URI;
 use IO::Select;
 use IO::Socket::INET;
 use Data::GUID;
+use Fcntl qw/O_NONBLOCK/;
+use POSIX qw/:sys_wait_h/;
 
 require 'sysexits.ph';
 
@@ -50,14 +52,20 @@ if (scalar(@uri) > 0) {
 		PeerAddr	=> $laddr,
 		PeerPort	=> $+{lport},
 		Proto		=> 'udp',
-		Blocking	=> 0,
 	);
 	unless (defined($u)) {
 		print STDERR "unable to bind() on $+{sport}/udp: $@\n";
 		exit &EX_OSERR;
 	}
 
-	$map{$u->fileno} = { sock => $u, laddr => $laddr, guid => Data::GUID->new->as_string, feeds => [ ], order => [ ] };
+	$map{$u->fileno} = {
+		sock	=> $u,
+		addr	=> $laddr,
+		guid	=> Data::GUID->new->as_string,
+		feeds	=> [ ],
+		order	=> [ ],
+		pids	=> { },
+	};
 
 	$sel_rd->add($u);
 
@@ -90,13 +98,39 @@ if (scalar(@uri) > 0) {
 		Listen		=> 5,
 		LocalPort	=> $port,
 		Proto		=> 'tcp',
-		Blocking	=> 0,
+		ReuseAddr	=> 1,
 	) or die "unable to bind() on $port/tcp: $@\n";
 
 	$sel_rd->add($sock);
 }
 
-# TODO handle SIGCHLD as the fork's exit
+$SIG{CHLD} = sub {
+	local ($!, $?);
+
+	while ((my $pid = waitpid(-1, WNOHANG)) > 0) {
+		my $fd;
+		foreach my $f (keys %map) {
+			next unless (defined($map{$f}{pids}{$pid}));
+
+			$fd = $f;
+			last;
+		}
+		unless (defined($fd)) {
+			print STDERR "orphan'd child died...huh?\n";
+			next;
+		}
+
+		$sel_ex->remove($map{$fd}{pids}{$pid});
+		$map{$fd}{pids}{$pid}->close;
+		delete $map{$fd}{pids}{$pid};
+
+		unless (scalar(keys %{$map{$fd}{pids}})) {
+			$sel_rd->remove($map{$fd}{sock});
+			$map{$fd}{sock}->close;
+			delete $map{$fd};
+		}
+	}
+};
 
 my $running = 1;
 while ($running) {
@@ -142,7 +176,7 @@ while ($running) {
 				$sel_rd->remove($fh);
 				$sel_ex->remove($fh);
 
-				send $fh, "SOCKTOPUS:0:ERROR\n", 0;
+				send $fh, "SOCKTOPUS:0:ERROR\n", O_NONBLOCK;
 				$fh->close;
 
 				next;
@@ -154,20 +188,26 @@ while ($running) {
 				PeerAddr	=> $raddr,
 				PeerPort	=> $+{rport},
 				Proto		=> 'udp',
-				Blocking	=> 0,
 			);
 			if (defined($u)) {
-				$map{$u->fileno} = { sock => $u, raddr => $raddr, guid => Data::GUID->new->as_string, feeds => [ ], order => [ ] };
+				$map{$u->fileno} = {
+					sock	=> $u,
+					addr	=> $raddr,
+					guid	=> Data::GUID->new->as_string,
+					feeds	=> [ ],
+					order	=> [ ],
+					pids	=> { },
+				};
 
 				$sel_rd->add($u);
 			} else {
 				foreach my $k (keys %map) {
 					next unless ($map{$k}{sock}->sockport == $+{dport}
-							&& $map{$k}{raddr} eq $+{raddr}
+							&& $map{$k}{addr} eq $raddr
 							&& $map{$k}{sock}->peerport == $+{rport});
 
 					unless ($map{$k}{guid} eq $+{token}) {
-						print $fh "SOCKTOPUS:0:ERROR bad token\n";
+						send $fh, "SOCKTOPUS:0:ERROR bad token\n", O_NONBLOCK;
 						print STDERR "bad token\n";
 						last;
 					}
@@ -189,9 +229,18 @@ while ($running) {
 
 			$sel_rd->remove($fh);
 
-			print $fh "SOCKTOPUS:0:OK $map{$u->fileno}{guid}\n";
+			my $pid = fork;
+			unless (defined($pid)) {
+				print STDERR "unable to fork\n";
+				$sel_ex->remove($fh);
+				$fh->close;
+				next;
+			}
 
-			# FORK
+			&child($fh, $u)
+				if ($pid == 0);
+
+			$map{$u->fileno}{pids}{$pid} = $fh;
 		}
 	}
 }
@@ -202,32 +251,70 @@ sub fwd($) {
 	my $fh = shift;
 }
 
-BEGIN {
+sub child($$) {
+	my ($tcp, $udp) = @_;
 
-# http://www.perlmonks.org/?node_id=581062
-{
-	package NBCSocket;
-	use IO::Socket::INET;
-	use Errno;
-	use Carp;
-	our @ISA = 'IO::Socket::INET';
-	sub connect {
-		@_ == 2 or croak 'usage: $sock->connect(NAME)';
-		my $sock = shift;
-		my $addr = shift;
-		my $timeout = ${*$sock}{'io_socket_timeout'};
-		my $err;
-		my $blocking;
-		$blocking = $sock->blocking(0);
-		if (!connect($sock, $addr)) {
-			if (!$!{EINPROGRESS}) {
-				$err = $!;
-				$@ = "connect: $!";
+	print $tcp "SOCKTOPUS:0:OK $map{$udp->fileno}{guid}\n";
+
+	my $buffer = '';
+	my $length = -1;
+	while (1) {
+		if ($length == -1) {
+			recv $tcp, my $l, 4, 0;
+			unless (length($l) == 4) {
+				print STDERR "did not read in four bytes\n";
+				last;
+			}
+
+			$length = unpack 'l>', $l;
+			if ($length < 1 || $length > 65535) {
+				print STDERR "bad length ('$length')\n";
+				last;
 			}
 		}
-		$! = $err if $err;
-		$err ? undef : $sock;
+
+		recv $tcp, my $b, $length - length($buffer), 0;
+		last if (length($b) == 0);
+
+		$buffer .= $b;
+		next if (length($buffer) < $length);
+
+		send $udp, substr($buffer, 0, $length), 0;
+		$buffer = substr $buffer, $length;
+		$length = -1;
 	}
+
+	print STDERR "connection closed\n";
+
+	$tcp->close;
+
+	exit &EX_OK;
 }
 
+BEGIN {
+	# http://www.perlmonks.org/?node_id=581062
+	{
+		package NBCSocket;
+		use IO::Socket::INET;
+		use Errno;
+		use Carp;
+		our @ISA = 'IO::Socket::INET';
+		sub connect {
+			@_ == 2 or croak 'usage: $sock->connect(NAME)';
+			my $sock = shift;
+			my $addr = shift;
+			my $timeout = ${*$sock}{'io_socket_timeout'};
+			my $err;
+			my $blocking;
+			$blocking = $sock->blocking(0);
+			if (!connect($sock, $addr)) {
+				if (!$!{EINPROGRESS}) {
+					$err = $!;
+					$@ = "connect: $!";
+				}
+			}
+			$! = $err if $err;
+			$err ? undef : $sock;
+		}
+	}
 }
