@@ -12,8 +12,7 @@ use Data::GUID;
 use Fcntl qw/O_NONBLOCK/;
 use POSIX qw/:sys_wait_h/;
 use Convert::ASN1 qw/:io/;
-
-require 'sysexits.ph';
+use Carp qw/cluck/;
 
 use Data::Dumper;
 
@@ -22,10 +21,8 @@ use constant SOCKTOPUS_OID => '2.25.97532385673460346314207847258541901083';
 my $data_start = tell DATA;
 
 my $asn = Convert::ASN1->new;
-unless (defined($asn->prepare(\*DATA))) {
-	warn 'ASN1 bust: ' . $asn->error;
-	exit &EX_SOFTWARE;
-}
+$asn->prepare(\*DATA)
+	or die 'ASN1 bust: ' . $asn->error;
 seek DATA, $data_start, 0;
 
 my %oidfwd;
@@ -34,30 +31,22 @@ while (<DATA>) {
 
 	$oidfwd{$1} = SOCKTOPUS_OID . '.' . $2;
 
-	my $h = $asn->find($1);
-	unless (defined($h)) {
-		warn "'$1' handler not found";
-		exit &EX_SOFTWARE;
-	}
+	my $h = $asn->find($1)
+		or die "'$1' handler not found";
 
 	$asn->registeroid($oidfwd{$1}, $h);
 }
 my %oidrev = reverse %oidfwd;
 
-my $msg = $asn->find('Message');
-unless (defined($msg)) {
-	warn "'Message' handler not found";
-	exit &EX_SOFTWARE;
-}
+my $msg = $asn->find('Message')
+	or die "'Message' handler not found";
 
 my @uri;
 foreach my $a (@ARGV) {
 	my $u = URI->new($a);
 
-	unless (defined($u) && $u->scheme ~~ [ 'tcp' ]) {
-		warn "'$a' is not a supported URI endpoints";
-		exit &EX_USAGE;
-	}
+	die "'$a' is not a supported URI endpoints"
+		unless (defined($u) && $u->scheme ~~ [ 'tcp' ]);
 
 	push @uri, $u;
 }
@@ -76,17 +65,13 @@ given ($mode) {
 		warn 'only passing in a single URI, a little strange, but okay...'
 			unless (scalar(@uri) > 1);
 
-		unless ($uri[0]->scheme eq 'tcp') {
-			warn "first URI ('$uri[0]') must be a TCP socket";
-			exit &EX_USAGE;
-		}
+		die "first URI ('$uri[0]') must be a TCP socket"
+			unless ($uri[0]->scheme eq 'tcp');
 
-		unless (defined($ENV{'UDPLOC'}) 
+		die 'env UDPLOC not set correctly (sport:[laddr]:lport)'
+			unless (defined($ENV{'UDPLOC'}) 
 				&& $ENV{'UDPLOC'} =~ /^(?<sport>[0-9]+):(?<laddr>.*)?:(?<lport>[0-9]+)$/
-				&& $+{sport} < 65536 && $+{lport} < 65536) {
-			warn 'env UDPLOC not set correctly (sport:[laddr]:lport)';
-			exit &EX_USAGE;
-		}
+				&& $+{sport} < 65536 && $+{lport} < 65536);
 
 		my $laddr = $+{laddr} || 'localhost';
 		my $u = IO::Socket::INET->new(
@@ -94,11 +79,7 @@ given ($mode) {
 			PeerAddr	=> $laddr,
 			PeerPort	=> $+{lport},
 			Proto		=> 'udp',
-		);
-		unless (defined($u)) {
-			warn "unable to bind() on $+{sport}/udp: $@";
-			exit &EX_OSERR;
-		}
+		) or die "unable to bind() on $+{sport}/udp: $@";
 
 		$map{$u->fileno} = {
 			sock	=> $u,
@@ -111,23 +92,19 @@ given ($mode) {
 
 		$sel_rd->add($u);
 
-		unless (defined($ENV{'UDPREM'}) 
+		die 'env UDPREM not set correctly (dport:[raddr]:rport)'
+			unless (defined($ENV{'UDPREM'}) 
 				&& $ENV{'UDPREM'} =~ /^(?<dport>[0-9]+):(?<raddr>.*)?:(?<rport>[0-9]+)$/
-				&& $+{dport} < 65536 && $+{rport} < 65536) {
-			warn 'env UDPREM not set correctly (dport:[raddr]:rport)';
-			exit &EX_USAGE;
-		}
+				&& $+{dport} < 65536 && $+{rport} < 65536);
 		my $dport = $+{dport};
 		my $rem = ( $+{raddr} || 'localhost' ) . ":$+{rport}";
 	}
 	when ('passive') {
 		print "running in passive mode\n";
 
-		my $port = $ENV{'PORT'} || 23461;
-		unless ($port =~ /^[0-9]+$/ && $port < 65536) {
-			warn 'env PORT not set to a suitable TCP port number';
-			exit &EX_USAGE;
-		}
+		my $port = $ENV{'PORT'} || '23461';
+		die 'env PORT not set to a suitable TCP port number'
+			unless ($port =~ /^[0-9]+$/ && $port < 65536);
 
 		$sock = IO::Socket::INET->new(
 			Listen		=> 5,
@@ -141,6 +118,7 @@ given ($mode) {
 }
 
 my $running = 1;
+$SIG{__DIE__} = \&confess;
 $SIG{CHLD} = \&sigchld;
 
 while ($running) {
@@ -149,14 +127,9 @@ while ($running) {
 	foreach my $fh (@$e) {
 		recv $fh, undef, 0 ,0;
 		warn "socket ${fh->file} exception: $!";
-
-		$sel_rd->remove($fh);
-		$sel_ex->remove($fh);
-
-		$fh->close;
+		&closestream($fh);
 	}
 
-	# active
 	foreach my $fh (@$w) {
 		sendmsg($fh, 'Hello', message => 'expected Hello message');
 	}
@@ -183,18 +156,13 @@ while ($running) {
 		# handshaking new stream
 		my $message;
 		unless (defined(recvmsg($fh, \$message)) && ref $message->{content} eq 'HASH') {
-			$sel_rd->remove($fh);
-			$sel_ex->remove($fh);
-			$fh->close;
+			&closestream($fh);
 			next;
 		}
 
 		unless ($message->{type} eq 'Hello') {
 			sendmsg($fh, 'Error', message => 'expected Hello message');
-
-			$sel_rd->remove($fh);
-			$sel_ex->remove($fh);
-			$fh->close;
+			&closestream($fh);
 			next;
 		}
 
@@ -209,9 +177,7 @@ while ($running) {
 				warn 'loop detected!';
 				sendmsg($fh, 'Error', message => 'loop requested');
 				$u->close;
-				$sel_rd->remove($fh);
-				$sel_ex->remove($fh);
-				$fh->close;
+				&closestream($fh);
 				next;
 			}
 
@@ -230,9 +196,7 @@ while ($running) {
 		} else {
 			unless (defined($message->{content}{token})) {
 				sendmsg($fh, 'Error', message => 'token required');
-				$sel_rd->remove($fh);
-				$sel_ex->remove($fh);
-				$fh->close;
+				&closestream($fh);
 				next;
 			}
 
@@ -254,9 +218,7 @@ while ($running) {
 			unless (defined($u)) {
 				warn "unable to bind ${\$message->{content}{port}}/udp: $@";
 				sendmsg($fh, 'Error', message => 'unable to bind to port');
-				$sel_rd->remove($fh);
-				$sel_ex->remove($fh);
-				$fh->close;
+				&closestream($fh);
 				next;
 			}
 		}
@@ -265,14 +227,7 @@ while ($running) {
 		unless (defined($pid)) {
 			warn 'unable to fork';
 			sendmsg($fh, 'Error', message => 'unable to fork');
-			$sel_rd->remove($fh);
-			$sel_ex->remove($fh);
-			$fh->close;
-			unless (scalar(keys %{$map{$u->fileno}{feeds}}) > 0) {
-				warn "no longer using \${$map{$u->fileno}{port}}/udp, closing";
-				$u->close;
-				delete $map{$u->fileno};
-			}
+			&closestream($fh);
 			next;
 		}
 
@@ -299,40 +254,40 @@ while ($running) {
 	}
 }
 
-exit &EX_OK;
+exit 0;
 
 sub sigchld {
 	local ($!, $?);
 
 	while ((my $pid = waitpid(-1, WNOHANG)) > 0) {
-		my $fd;
-		foreach my $f (keys %map) {
-			next unless (defined($map{$f}{pids}{$pid}));
+		my $fd = shift (grep { defined($map{$_}{pids}{$pid}) } keys %map)
+			or die 'orphaned child died';
 
-			$fd = $f;
-			last;
-		}
-		unless (defined($fd)) {
-			warn "orphan'd child died...huh?";
-			next;
-		}
-
-		my $fh = $map{$fd}{feeds}{$map{$fd}{pids}{$pid}};
-
-		$sel_rd->remove($fh);
-		$sel_ex->remove($fh);
-		$fh->close;
-
-		delete $map{$fd}{feeds}{$fh->fileno};
+		my $fh = $map{$fd}{feeds}{$map{$_}{pids}{$pid}};
 		delete $map{$fd}{pids}{$pid};
-		@{$map{$fd}{feeds}{order}} = grep { $_ != $fh->fileno } @{$map{$fd}{feeds}{order}};
 
-		unless (scalar(keys %{$map{$fd}{feeds}}) > 0) {
-			warn "no longer using \${$map{$fd}{port}}/udp, closing\n";
-			$map{$fd}{sock}->close;
-			delete $map{$fd};
-		}
+		&closestream($fh);
 	}
+}
+
+sub closestream {
+	my $fh = shift;
+
+	my $mfd = shift (grep { defined($map{$_}{feeds}{$fh->fileno}) } keys %map)
+		or die 'closestream called for non-existent fh';
+
+	$sel_rd->remove($fh);
+	$sel_ex->remove($fh);
+	$fh->close;
+
+	@{$map{$mfd}{order}} = grep { $_ != $fh->fileno } @{$map{$mfd}{order}};
+	delete $map{$mfd}{feeds}{$fh->fileno};
+
+	return if (scalar(keys %{$map{$mfd}{feeds}}) > 0);
+
+	warn "no longer using \${$map{$mfd}{port}}/udp, closing\n";
+	$map{$mfd}{sock}->close;
+	delete $map{$mfd};
 };
 
 sub ingress {
@@ -351,7 +306,7 @@ sub ingress {
 
 	$tcp->close;
 
-	exit &EX_OK;
+	exit 0;
 }
 
 sub egress {
@@ -361,16 +316,12 @@ sub egress {
 sub sendmsg {
 	my ($sock, $type, %payload) = @_;
 
-	unless (defined($oidfwd{$type})) {
-		warn "handler '$type' not found";
-		exit &EX_SOFTWARE;
-	}
+	die "handler '$type' not found"
+		unless (defined($oidfwd{$type}));
 
 	my $m = $msg->encode(type => $oidfwd{$type}, content => \%payload);
-	unless (defined($m)) {
-		warn "unable to create '$type' Message";
-		exit &EX_SOFTWARE;
-	}
+	die "unable to create '$type' Message"
+		unless (defined($m));
 
 	return asn_send($sock, $m);
 }
