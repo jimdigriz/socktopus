@@ -203,7 +203,7 @@ while ($running) {
 		}
 
 		unless ($message->{type} eq 'Hello') {
-			sendmsg($fh, 'Error', tag => '-1', message => 'expected Hello message');
+			sendmsg($fh, 'Error', message => 'expected Hello message');
 
 			$sel->remove($fh);
 			$fh->close;
@@ -219,7 +219,7 @@ while ($running) {
 		if (defined($u)) {
 			if ($u->sockhost eq $u->peerhost && $u->sockport == $u->peerport) {
 				print STDERR "loop detected!\n";
-				sendmsg($fh, 'Error', tag => '-1', message => 'loop requested');
+				sendmsg($fh, 'Error', message => 'loop requested');
 				$u->close;
 				$sel->remove($fh);
 				$fh->close;
@@ -240,7 +240,7 @@ while ($running) {
 			$sel->add($u);
 		} else {
 			unless (defined($message->{content}{token})) {
-				sendmsg($fh, 'Error', tag => '-1', message => 'token required');
+				sendmsg($fh, 'Error', message => 'token required');
 				$sel->remove($fh);
 				$fh->close;
 				next;
@@ -253,7 +253,7 @@ while ($running) {
 
 				unless ($message->{content}{token} eq $map{$k}{token}) {
 					print STDERR "bad token\n";
-					sendmsg($fh, 'Error', tag => '-1', message => 'bad token');
+					sendmsg($fh, 'Error', message => 'bad token');
 					last;
 				}
 
@@ -263,7 +263,7 @@ while ($running) {
 
 			unless (defined($u)) {
 				print STDERR "unable to bind ${\$message->{content}{port}}/udp: $@\n";
-				sendmsg($fh, 'Error', tag => '-1', message => 'unable to bind to port');
+				sendmsg($fh, 'Error', message => 'unable to bind to port');
 				$sel->remove($fh);
 				$fh->close;
 				next;
@@ -273,7 +273,7 @@ while ($running) {
 		my $pid = fork;
 		unless (defined($pid)) {
 			print STDERR "unable to fork\n";
-			sendmsg($fh, 'Error', tag => '-1', message => 'unable to fork');
+			sendmsg($fh, 'Error', message => 'unable to fork');
 			$sel->remove($fh);
 			$fh->close;
 			unless (scalar(keys %{$map{$u->fileno}{feeds}}) > 0) {
@@ -308,7 +308,7 @@ exit &EX_OK;
 sub ingress {
 	my ($tcp, $udp) = @_;
 
-	sendmsg($tcp, 'Connected', tag => '-1', token => $map{$udp->fileno}{token});
+	sendmsg($tcp, 'Connected', token => $map{$udp->fileno}{token});
 
 	while (1) {
 		my $message;
@@ -417,7 +417,6 @@ Hello ::= SEQUENCE {
 
 -- socktopusError OBJECT IDENTIFIER ::= { socktopus 2 }
 Error ::= SEQUENCE {
-	tag INTEGER,
 	message PrintableString
 }
 
@@ -428,7 +427,6 @@ Connected ::= SEQUENCE {
 
 -- socktopusData OBJECT IDENTIFIER ::= { socktopus 4 }
 Data ::= SEQUENCE {
-	tag INTEGER,
 	sequence SEQUENCE {
 		global INTEGER,
 		local INTEGER
