@@ -30,7 +30,7 @@ seek DATA, $data_start, 0;
 
 my %oidfwd;
 while (<DATA>) {
-	next unless /^--\s+socktopus([a-z0-9]+)\s+OBJECT IDENTIFIER\s+::=\s+{\s+socktopus\s+(\d+)\s+}$/i;
+	next unless /^--\s+socktopus([a-zA-Z0-9]+)\s+OBJECT IDENTIFIER\s+::=\s+{\s+socktopus\s+(\d+)\s+}$/;
 
 	$oidfwd{$1} = SOCKTOPUS_OID . '.' . $2;
 
