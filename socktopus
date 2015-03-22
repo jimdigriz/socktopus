@@ -11,10 +11,15 @@ use IO::Socket::INET;
 use Data::GUID;
 use Fcntl qw/O_NONBLOCK/;
 use POSIX qw/:sys_wait_h/;
+use Convert::ASN1 qw/:io/;
 
 require 'sysexits.ph';
 
 use Data::Dumper;
+
+use constant SOCKTOPUS_OID => '2.25.97532385673460346314207847258541901083';
+
+my $data_start = tell DATA;
 
 my @uri;
 foreach my $a (@ARGV) {
@@ -28,11 +33,37 @@ foreach my $a (@ARGV) {
 	push @uri, $u;
 }
 
+my $asn = Convert::ASN1->new;
+unless (defined($asn->prepare(\*DATA))) {
+	print STDERR "ASN1 bust: ${\$asn->error}\n";
+	exit &EX_SOFTWARE;
+}
+seek DATA, $data_start, 0;
+
+my %oidfwd;
+while (<DATA>) {
+	next unless /^--\s+socktopus([a-z0-9]+)\s+OBJECT IDENTIFIER\s+::=\s+{\s+socktopus\s+(\d+)\s+}$/i;
+
+	$oidfwd{$1} = SOCKTOPUS_OID . '.' . $2;
+
+	my $h = $asn->find($1);
+	unless (defined($h)) {
+		print STDERR "'$1' handler not found\n";
+		exit &EX_SOFTWARE;
+	}
+
+	$asn->registeroid($oidfwd{$1}, $h);
+}
+my %oidrev = reverse %oidfwd;
+
+my $msg = $asn->find('Message');
+unless (defined($msg)) {
+	print STDERR "'Message' handler not found\n";
+	exit &EX_SOFTWARE;
+}
+
 my %map;
-# UDP sockets and *initiating* TCP sockets in here
-my $sel_rd = IO::Select->new;
-# just TCP sockets in here
-my $sel_ex = IO::Select->new;
+my $sel = IO::Select->new;
 
 my $sock = -1;
 if (scalar(@uri) > 0) {
@@ -60,13 +91,13 @@ if (scalar(@uri) > 0) {
 	$map{$u->fileno} = {
 		sock	=> $u,
 		addr	=> $laddr,
-		guid	=> Data::GUID->new->as_string,
+		token	=> Data::GUID->new->as_string,
 		feeds	=> [ ],
 		order	=> [ ],
 		pids	=> { },
 	};
 
-	$sel_rd->add($u);
+	$sel->add($u);
 
 	unless (defined($ENV{'UDPREM'}) 
 			&& $ENV{'UDPREM'} =~ /^(?<dport>[0-9]+):(?<raddr>.*)?:(?<rport>[0-9]+)$/
@@ -100,7 +131,7 @@ if (scalar(@uri) > 0) {
 		ReuseAddr	=> 1,
 	) or die "unable to bind() on $port/tcp: $@\n";
 
-	$sel_rd->add($sock);
+	$sel->add($sock);
 }
 
 $SIG{CHLD} = sub {
@@ -119,12 +150,17 @@ $SIG{CHLD} = sub {
 			next;
 		}
 
-		$sel_ex->remove($map{$fd}{pids}{$pid});
-		$map{$fd}{pids}{$pid}->close;
-		delete $map{$fd}{pids}{$pid};
+		my $fh = $map{$fd}{feeds}{$map{$fd}{pids}{$pid}};
 
-		unless (scalar(keys %{$map{$fd}{pids}})) {
-			$sel_rd->remove($map{$fd}{sock});
+		$sel->remove($fh);
+		$fh->close;
+
+		delete $map{$fd}{feeds}{$fh->fileno};
+		delete $map{$fd}{pids}{$pid};
+		@{$map{$fd}{feeds}{order}} = grep { $_ != $fh->fileno } @{$map{$fd}{feeds}{order}};
+
+		unless (scalar(keys %{$map{$fd}{feeds}}) > 0) {
+			print STDERR "no longer using $map{$fd}{port}/udp, closing\n";
 			$map{$fd}{sock}->close;
 			delete $map{$fd};
 		}
@@ -133,171 +169,152 @@ $SIG{CHLD} = sub {
 
 my $running = 1;
 while ($running) {
-	my ($r, undef, $e) = IO::Select::select($sel_rd, undef, $sel_ex);
+	my ($r, undef, $e) = IO::Select::select($sel, undef, $sel);
 
 	foreach my $fh (@$e) {
 		recv $fh, undef, 0 ,0;
 		print STDERR "socket ${fh->file} exception: $!";
 
-		$sel_rd->remove($fh);
-		$sel_ex->remove($fh);
-
-		# TODO
-		# kill forks using this socket
+		$sel->remove($fh);
 
 		$fh->close;
 	}
 
 	foreach my $fh (@$r) {
+		# new client
 		if ($fh == $sock) {
 			my $c = $fh->accept;
-			$sel_rd->add($c);
-			$sel_ex->add($c);
+			$sel->add($c);
 			next;
 		}
 
+		# new udp packet
 		if (defined($map{$fh->fileno})) {
-			&fwd($fh);
+			&egress($fh);
 			next;
 		}
 
-		if ($fh->fileno ~~ [ map { $_->fileno } $sel_ex->handles ]) {
-			my $buffer;
-			unless (defined(recv $fh, $buffer, 1000, 0) && length($buffer) > 0) {
-				$sel_rd->remove($fh);
-				$sel_ex->remove($fh);
+		# handshaking new stream
+		my $message;
+		unless (defined(recvmsg($fh, \$message)) && ref $message->{content} eq 'HASH') {
+			$sel->remove($fh);
+			$fh->close;
+			next;
+		}
+
+		unless ($message->{type} eq 'Hello') {
+			sendmsg($fh, 'Error', tag => '-1', message => 'expected Hello message');
+
+			$sel->remove($fh);
+			$fh->close;
+			next;
+		}
+
+		my $u = IO::Socket::INET->new(
+			LocalPort	=> $message->{content}{port},
+			PeerAddr	=> $message->{content}{daddress},
+			Proto		=> 'udp',
+			PeerPort	=> $message->{content}{dport},
+		);
+		if (defined($u)) {
+			if ($u->sockhost eq $u->peerhost && $u->sockport == $u->peerport) {
+				print STDERR "loop detected!\n";
+				sendmsg($fh, 'Error', tag => '-1', message => 'loop requested');
+				$u->close;
+				$sel->remove($fh);
 				$fh->close;
 				next;
 			}
 
-			unless ($buffer =~ /^SOCKTOPUS:0:CONNECT\s+(?<dport>[0-9]+):(?<raddr>.*)?:(?<rport>[0-9]+)(?:\s+(?<token>.+))?$/
-					&& $+{dport} < 65536 && $+{rport} < 65536) {
-				$sel_rd->remove($fh);
-				$sel_ex->remove($fh);
+			$map{$u->fileno} = {
+				sock	=> $u,
+				port	=> $message->{content}{port},
+				daddr	=> $message->{content}{daddress},
+				dport	=> $message->{content}{dport},
+				token	=> Data::GUID->new->as_string,
+				feeds	=> { },
+				pids	=> { },
+				order	=> [ ],
+			};
 
-				send $fh, "SOCKTOPUS:0:ERROR\n", O_NONBLOCK;
+			$sel->add($u);
+		} else {
+			unless (defined($message->{content}{token})) {
+				sendmsg($fh, 'Error', tag => '-1', message => 'token required');
+				$sel->remove($fh);
 				$fh->close;
-
 				next;
 			}
 
-			my $raddr = $+{raddr} || 'localhost';
-			my $u = IO::Socket::INET->new(
-				LocalPort	=> $+{dport},
-				PeerAddr	=> $raddr,
-				PeerPort	=> $+{rport},
-				Proto		=> 'udp',
-			);
-			if (defined($u)) {
-				if ($u->sockhost eq $u->peerhost && $u->sockport == $u->peerport) {
-					send $fh, "SOCKTOPUS:0:ERROR loop requested\n", O_NONBLOCK;
-					print STDERR "loop detected!\n";
-					$sel_rd->remove($fh);
-					$sel_ex->remove($fh);
-					$u->close;
-					$fh->close;
-					next;
-				}
+			foreach my $k (keys %map) {
+				next unless ($message->{content}{port} eq $map{$k}{port}
+						&& $message->{content}{daddress} eq $map{$k}{daddr}
+						&& $message->{content}{dport} eq $map{$k}{dport});
 
-				$map{$u->fileno} = {
-					sock	=> $u,
-					addr	=> $raddr,
-					guid	=> Data::GUID->new->as_string,
-					feeds	=> [ ],
-					order	=> [ ],
-					pids	=> { },
-				};
-
-				$sel_rd->add($u);
-			} else {
-				foreach my $k (keys %map) {
-					next unless ($map{$k}{sock}->sockport == $+{dport}
-							&& $map{$k}{addr} eq $raddr
-							&& $map{$k}{sock}->peerport == $+{rport});
-
-					unless ($map{$k}{guid} eq $+{token}) {
-						send $fh, "SOCKTOPUS:0:ERROR bad token\n", O_NONBLOCK;
-						print STDERR "bad token\n";
-						last;
-					}
-
-					$u = $map{$k}{sock};
+				unless ($message->{content}{token} eq $map{$k}{token}) {
+					print STDERR "bad token\n";
+					sendmsg($fh, 'Error', tag => '-1', message => 'bad token');
 					last;
 				}
 
-				unless (defined($u)) {
-					print STDERR "unable to bind $+{rport}/udp: $@\n";
-					$sel_rd->remove($fh);
-					$sel_ex->remove($fh);
-					$fh->close;
-					next;
-				}
+				$u = $map{$k}{sock};
+				last;
 			}
 
-			push @{$map{$u->fileno}{feeds}}, $fh;
-
-			$sel_rd->remove($fh);
-
-			my $pid = fork;
-			unless (defined($pid)) {
-				print STDERR "unable to fork\n";
-				$sel_ex->remove($fh);
+			unless (defined($u)) {
+				print STDERR "unable to bind ${\$message->{content}{port}}/udp: $@\n";
+				sendmsg($fh, 'Error', tag => '-1', message => 'unable to bind to port');
+				$sel->remove($fh);
 				$fh->close;
 				next;
 			}
+		}
 
-			&child($fh, $u)
-				if ($pid == 0);
-
-			$map{$u->fileno}{pids}{$pid} = $fh;
+		my $pid = fork;
+		unless (defined($pid)) {
+			print STDERR "unable to fork\n";
+			sendmsg($fh, 'Error', tag => '-1', message => 'unable to fork');
+			$sel->remove($fh);
+			$fh->close;
+			unless (scalar(keys %{$map{$u->fileno}{feeds}}) > 0) {
+				print STDERR "no longer using $map{$u->fileno}{port}/udp, closing\n";
+				$u->close;
+				delete $map{$u->fileno};
+			}
 			next;
 		}
+
+		if ($pid == 0) {
+			STDIN->close;
+
+			$_->close
+				foreach (grep { !($_->fileno ~~ [ $fh->fileno, $u->fileno ]) } $sel->handles);
+
+			&ingress($fh, $u);
+		}
+
+		$map{$u->fileno}{feeds}{$fh->fileno} = $fh;
+		$map{$u->fileno}{pids}{$pid} = $fh->fileno;
+		unshift @{$map{$u->fileno}{order}}, $fh->fileno;
+
+		$sel->remove($fh);
+
+		next;
 	}
 }
 
 exit &EX_OK;
 
-sub fwd($) {
-	my $u = shift;
-
-	my $buffer;
-
-	unless (defined(recv $u, $buffer, 10000, 0) && length($buffer) > 0) {
-		
-	}
-}
-
-sub child($$) {
+sub ingress {
 	my ($tcp, $udp) = @_;
 
-	print $tcp "SOCKTOPUS:0:OK $map{$udp->fileno}{guid}\n";
+	sendmsg($tcp, 'Connected', tag => '-1', token => $map{$udp->fileno}{token});
 
-	my $buffer = '';
-	my $length = -1;
 	while (1) {
-		if ($length == -1) {
-			my $l;
-			unless (defined(recv $tcp, $l, 4, 0) && length($l) == 4) {
-				print STDERR "did not read in four bytes: $!\n";
-				last;
-			}
+		my $message;
+		last unless (defined(recvmsg($tcp, \$message)) && ref $message->{content} eq 'HASH');
 
-			$length = unpack 'l>', $l;
-			if ($length < 1 || $length > 65535) {
-				print STDERR "bad length ('$length')\n";
-				last;
-			}
-		}
-
-		my $b;
-		last unless (defined(recv $tcp, $b, $length - length($buffer), 0) && length($b) > 0);
-
-		$buffer .= $b;
-		next if (length($buffer) < $length);
-
-		send $udp, substr($buffer, 0, $length), 0;
-		$buffer = substr $buffer, $length;
-		$length = -1;
+		send $udp, $message->{content}{payload}, 0;
 	}
 
 	print STDERR "connection closed\n";
@@ -305,6 +322,51 @@ sub child($$) {
 	$tcp->close;
 
 	exit &EX_OK;
+}
+
+sub egress {
+	my $u = shift;
+
+	if (scalar(@uri) > 0) {
+	}
+}
+
+sub sendmsg {
+	my ($sock, $type, %payload) = @_;
+
+	unless (defined($oidfwd{$type})) {
+		print STDERR "handler '$type' not found\n";
+		exit &EX_SOFTWARE;
+	}
+
+	my $m = $msg->encode(type => $oidfwd{$type}, content => \%payload);
+	unless (defined($m)) {
+		print STDERR "unable to create '$type' Message\n";
+		exit &EX_SOFTWARE;
+	}
+
+	return asn_send($sock, $m);
+}
+
+sub recvmsg {
+	my ($sock, $buf) = @_;
+
+	my $sin = asn_recv $sock, my $b, 0;
+	return unless (defined($sin));
+
+	my $p = $msg->decode($b);
+
+	my $t = $oidrev{$p->{type}};
+	unless (defined($t)) {
+		print STDERR "unknown OID '$p->{type}'\n";
+		return;
+	}
+
+	$p->{type} = $t;
+
+	$$buf = $p;
+
+	return $sin;
 }
 
 BEGIN {
@@ -333,4 +395,43 @@ BEGIN {
 			$err ? undef : $sock;
 		}
 	}
+}
+
+__DATA__
+-- 49600de0-cfcb-11e4-ad23-0002a5d5c51b
+-- socktopus { joint-iso-itu-t(2) uuid(25) socktopus(97532385673460346314207847258541901083) }
+
+Message ::= SEQUENCE {
+	type OBJECT IDENTIFIER,
+	content ANY DEFINED BY type
+}
+
+-- socktopusHello OBJECT IDENTIFIER ::= { socktopus 1 }
+Hello ::= SEQUENCE {
+	version INTEGER,
+	port IA5String,
+	daddress IA5String,
+	dport IA5String,
+	token IA5String OPTIONAL
+}
+
+-- socktopusError OBJECT IDENTIFIER ::= { socktopus 2 }
+Error ::= SEQUENCE {
+	tag INTEGER,
+	message PrintableString
+}
+
+-- socktopusConnected OBJECT IDENTIFIER ::= { socktopus 3 }
+Connected ::= SEQUENCE {
+	token IA5String
+}
+
+-- socktopusData OBJECT IDENTIFIER ::= { socktopus 4 }
+Data ::= SEQUENCE {
+	tag INTEGER,
+	sequence SEQUENCE {
+		global INTEGER,
+		local INTEGER
+	},
+	payload OCTET STRING
 }
