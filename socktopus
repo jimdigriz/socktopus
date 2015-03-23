@@ -143,7 +143,7 @@ given ($mode) {
 
 			$handle->on_error(sub {
 				AE::log $_[1] ? 'fatal' : 'error' => 'stream: ' . $_[2];
-				delete $stream{$_[0]->fileno};
+				&streamclose($_[0]);
 			});
 			$handle->on_read(sub {
 				my ($tb,$tag) = asn_decode_tag($_[0]->{rbuf})
@@ -162,7 +162,7 @@ given ($mode) {
 			$handle->on_eof(sub {
 				AE::log error => 'stream closing';
 				$_[0]->push_shutdown;
-				delete $stream{$_[0]->fh->fileno};
+				&streamclose($_[0]);
 			});
 		});
 	}
@@ -206,7 +206,7 @@ sub recvmsg {
 				break;
 			}
 
-			&hookup($handle, $message);
+			&streamconnect($handle, $message);
 
 			$stream{$handle->fh->fileno}{state} = 'member';
 		}
@@ -220,7 +220,7 @@ sub recvmsg {
 
 			my $ufd = (grep { $handle->fh->fileno ~~ [ @{$map{$_}{feed}} ] } keys %map)[0];
 			unless (defined($ufd)) {
-				AE::log error => "orphaned fh";
+				AE::log error => 'orphaned fh';
 				sendmsg($handle, 'Error', message => 'orphaned fh');
 				$handle->push_shutdown;
 				break;
@@ -236,7 +236,7 @@ sub recvmsg {
 	}
 }
 
-sub hookup {
+sub streamconnect {
 	my ($handle, $message) = @_;
 
 	my $tuple = join ' ', $message->{content}{host}, $message->{content}{service},
@@ -286,4 +286,26 @@ sub hookup {
 	}
 
 	sendmsg($handle, 'Connected', token => $map{$ufd}{token});
+}
+
+sub streamclose {
+	my $handle = shift;
+
+	my $ufd = (grep { $handle->fh->fileno ~~ [ @{$map{$_}{feed}} ] } keys %map)[0];
+	unless (defined($ufd)) {
+		AE::log fatal => 'orphaned fh';
+		return;
+	}
+
+	@{$map{$ufd}{feed}} = grep { $_ != $handle->fh->fileno } @{$map{$ufd}{order}};
+	@{$map{$ufd}{order}} = grep { $_ != $handle->fh->fileno } @{$map{$ufd}{feed}};
+
+	delete $stream{$handle->fh->fileno};
+
+	return if (@{$map{$ufd}{order}});
+
+	AE::log note => 'no longer using UDP socket, closing';
+
+	$map{$ufd}{handle}->destroy;
+	delete $map{$ufd};
 }
