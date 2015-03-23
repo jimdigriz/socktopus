@@ -322,7 +322,8 @@ sub forward {
 
 	my $ufd = $handle->fh->fileno;
 	foreach my $fd (@{$map{$ufd}{order}}) {
-		if (send($stream{$fd}{handle}->fh, '', 0) == 0) {
+		vec(my $win = '', $stream{$fd}{handle}->fh->fileno, 1) = 1;
+		if (select(undef, $win, undef, 0)) {
 			sendmsg($stream{$fd}{handle}, 'Data', sequence => { global => -1, local => -1 }, payload => $data);
 			last;
 		}
