@@ -206,6 +206,13 @@ sub recvmsg {
 				break;
 			}
 
+			unless ($message->{content}{version} == 0) {
+				AE::log warn => "client requests unsupported version ${\$message->{content}{version}}";
+				sendmsg($handle, 'Error', message => 'unsupported version');
+				$handle->push_shutdown;
+				break;
+			}
+
 			&streamconnect($handle, $message);
 
 			$stream{$handle->fh->fileno}{state} = 'member';
