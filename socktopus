@@ -114,7 +114,7 @@ given ($mode) {
 			},
 		);
 
-		$map{$handle->fh->fileno} = {
+		$map{$fh->fileno} = {
 			handle	=> $handle,
 			tuple	=> join(' ', $host, $serv, $rhost, $+{rserv}),
 			rhost	=> $fh->peerhost,
@@ -270,7 +270,7 @@ sub hookup {
 			},
 		);
 
-		$ufd = $uhandle->fh->fileno;
+		$ufd = $fh->fileno;
 
 		$map{$ufd} = {
 			handle	=> $uhandle,
