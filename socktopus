@@ -102,6 +102,7 @@ given ($mode) {
 			Proto		=> 'udp',
 			LocalPort	=> $serv,
 			PeerPort	=> $+{rserv},
+			Blocking	=> 0,
 		) or AE::log fatal => "bind: $@";
 
 		my $handle = AnyEvent::Handle::UDP->new(
@@ -109,9 +110,7 @@ given ($mode) {
 			on_error	=> sub {
 				AE::log $_[1] ? 'fatal' : 'error' => $_[2];
 			},
-			on_recv		=> sub {
-				my ($data, $hdl, $src) = @_;
-			},
+			on_recv		=> \&forward,
 		);
 
 		$map{$fh->fileno} = {
@@ -253,6 +252,7 @@ sub streamconnect {
 		}
 
 		push @{$map{$ufd}{feed}}, $handle->fh->fileno;
+		unshift @{$map{$ufd}{order}}, $handle->fh->fileno;
 	} else {
 		my $fh = IO::Socket::INET->new(
 			LocalHost	=> $message->{content}{host},
@@ -260,6 +260,7 @@ sub streamconnect {
 			Proto		=> 'udp',
 			LocalPort	=> $message->{content}{service},
 			PeerPort	=> $message->{content}{rservice},
+			Blocking	=> 0,
 		) or AE::log fatal => "bind: $@";
 
 		my $uhandle = AnyEvent::Handle::UDP->new(
@@ -267,9 +268,7 @@ sub streamconnect {
 			on_error	=> sub {
 				AE::log $_[1] ? 'fatal' : 'error' => $_[2];
 			},
-			on_recv		=> sub {
-				my ($data, $hdl, $src) = @_;
-			},
+			on_recv		=> \&forward,
 		);
 
 		$ufd = $fh->fileno;
@@ -281,7 +280,7 @@ sub streamconnect {
 			rserv	=> $fh->peerport,
 			token	=> Data::GUID->new->as_string,
 			feed	=> [ $handle->fh->fileno ],
-			order	=> [ ],
+			order	=> [ $handle->fh->fileno ],
 		};
 
 		$fh->connect(pack('S n L x8', AF_UNSPEC, 0, 0));
@@ -293,7 +292,7 @@ sub streamconnect {
 }
 
 sub streamclose {
-	my $handle = shift;
+	my ($handle) = @_;
 
 	my $sfd = $handle->fh->fileno;
 	$handle->destroy;
@@ -311,4 +310,21 @@ sub streamclose {
 
 	$map{$ufd}{handle}->destroy;
 	delete $map{$ufd};
+}
+
+sub forward {
+	my ($data, $handle, $src) = @_;
+
+	# TODO check from expected source or use BPF
+
+	my $ufd = $handle->fh->fileno;
+	foreach my $fd (@{$map{$ufd}{order}}) {
+		if (send($stream{$fd}{handle}->fh, '', 0) == 0) {
+			sendmsg($stream{$fd}{handle}, 'Data', sequence => { global => -1, local => -1 }, payload => $data);
+			last;
+		}
+
+		@{$map{$ufd}{order}} = grep { $_ != $fd } @{$map{$ufd}{order}};
+		splice @{$map{$ufd}{order}}, int(rand(length(@{$map{$ufd}{order}}))), 0, $fd;
+	}
 }
