@@ -6,23 +6,44 @@ use warnings;
 use v5.14;
 
 use URI;
-use IO::Select;
+use AnyEvent;
+use AnyEvent::Log;
+use AnyEvent::Handle;
+use AnyEvent::Socket;
+use AnyEvent::Handle::UDP;
 use IO::Socket::INET;
 use Data::GUID;
-use Fcntl qw/O_NONBLOCK/;
-use POSIX qw/:sys_wait_h/;
-use Convert::ASN1 qw/:io/;
-use Carp qw/cluck/;
+use Convert::ASN1 qw/:tag/;
+use Carp;
+use POSIX qw/strftime/;
 
 use Data::Dumper;
 
-use constant SOCKTOPUS_OID => '2.25.97532385673460346314207847258541901083';
+use constant SOCKTOPUS_OID	=> '2.25.97532385673460346314207847258541901083';
+
+use constant RE_UDP		=> qr/^(?:\[?(?<host>[^\]]+)\]?:)?(?:(?<serv>[a-z0-9-]+):)?(?:\[?(?<rhost>[^\]]+)\]?:)?(?<rserv>[a-z0-9-]+)$/;
+use constant RE_SERVICE		=> qr/^(?:\[?(?<host>[^\]]+)\]?:)?(?<serv>[a-z0-9-]+)$/;
 
 my $data_start = tell DATA;
 
-my $asn = Convert::ASN1->new;
+AnyEvent::Log::ctx->fmt_cb(sub { \@_ });
+AnyEvent::Log::ctx->log_cb(sub {
+	my $m = $AnyEvent::Log::LEVEL2STR[$_[0]->[2]] . ' ' . $_[0]->[3];
+	$m = strftime('%F_%T.00000 ', gmtime($_[0]->[0])) . $m
+		if (-t STDIN && -t STDOUT);
+
+	if ($_[0]->[2] == 1) {
+		Carp::cluck $m;
+	} else {
+		print STDERR "$m\n";
+	}
+
+	1;
+});
+
+my $asn = Convert::ASN1->new(tagdefault => 'EXPLICIT');
 $asn->prepare(\*DATA)
-	or die 'ASN1 bust: ' . $asn->error;
+	or AE::log fatal => 'ASN1 bust: ' . $asn->error;
 seek DATA, $data_start, 0;
 
 my %oidfwd;
@@ -32,347 +53,220 @@ while (<DATA>) {
 	$oidfwd{$1} = SOCKTOPUS_OID . '.' . $2;
 
 	my $h = $asn->find($1)
-		or die "'$1' handler not found";
+		or AE::log fatal => "'$1' handler not found";
 
 	$asn->registeroid($oidfwd{$1}, $h);
 }
 my %oidrev = reverse %oidfwd;
 
 my $msg = $asn->find('Message')
-	or die "'Message' handler not found";
+	or AE::log fatal => "'Message' handler not found";
 
 my @uri;
 foreach my $a (@ARGV) {
 	my $u = URI->new($a);
 
-	die "'$a' is not a supported URI endpoints"
+	AE::log fatal => "'$a' is not a supported URI endpoints"
 		unless (defined($u) && $u->scheme ~~ [ 'tcp' ]);
 
 	push @uri, $u;
 }
 my $mode = (scalar(@uri)) ? 'active' : 'passive';
+AE::log info => "running $mode";
 
-my $sock = -1;
-my %map;
-my $sel_rd = IO::Select->new;
-my $sel_wr = IO::Select->new;
-my $sel_ex = IO::Select->new;
-
+my ($sock, %stream, %map);
 given ($mode) {
 	when ('active') {
-		print "running in active mode\n";
-
-		warn 'only passing in a single URI, a little strange, but okay...'
+		AE::log warn => 'only passing in a single URI'
 			unless (scalar(@uri) > 1);
 
-		die "first URI ('$uri[0]') must be a TCP socket"
+		AE::log fatal => "first URI ('$uri[0]') must be a TCP socket"
 			unless ($uri[0]->scheme eq 'tcp');
 
-		die 'env UDPLOC not set correctly (sport:[laddr]:lport)'
-			unless (defined($ENV{'UDPLOC'}) 
-				&& $ENV{'UDPLOC'} =~ /^(?<sport>[0-9]+):(?<laddr>.*)?:(?<lport>[0-9]+)$/
-				&& $+{sport} < 65536 && $+{lport} < 65536);
+		AE::log fatal => 'env UDPREM not set correctly ([host:][serv:][rhost:]rserv)'
+			unless (defined($ENV{'UDPREM'}) && $ENV{'UDPREM'} =~ RE_UDP);
 
-		my $laddr = $+{laddr} || 'localhost';
-		my $u = IO::Socket::INET->new(
-			LocalPort	=> $+{sport},
-			PeerAddr	=> $laddr,
-			PeerPort	=> $+{lport},
+		AE::log fatal => 'env UDPLOC not set correctly ([host:][serv:][rhost:]rserv)'
+			unless (defined($ENV{'UDPLOC'}) && $ENV{'UDPLOC'} =~ RE_UDP);
+
+		my $host = $+{host} || 'localhost';
+		my $serv = $+{serv} || '23461';
+		my $rhost = $+{rhost} || 'localhost';
+		my $fh = IO::Socket::INET->new(
+			LocalHost	=> $host,
+			PeerHost	=> $rhost,
 			Proto		=> 'udp',
-		) or die "unable to bind() on $+{sport}/udp: $@";
+			LocalPort	=> $serv,
+			PeerPort	=> $+{rserv},
+		) or AE::log fatal => "bind: $@";
 
-		$map{$u->fileno} = {
-			sock	=> $u,
-			addr	=> $laddr,
+		my $handle = AnyEvent::Handle::UDP->new(
+			fh		=> $fh,
+			on_error	=> sub {
+				AE::log $_[1] ? 'fatal' : 'error' => $_[2];
+			},
+			on_recv		=> sub {
+				my ($data, $hdl, $src) = @_;
+			},
+		);
+
+		$map{$handle->fh->fileno} = {
+			hdl	=> $handle,
 			token	=> Data::GUID->new->as_string,
-			feeds	=> [ ],
-			order	=> [ ],
-			pids	=> { },
 		};
-
-		$sel_rd->add($u);
-
-		die 'env UDPREM not set correctly (dport:[raddr]:rport)'
-			unless (defined($ENV{'UDPREM'}) 
-				&& $ENV{'UDPREM'} =~ /^(?<dport>[0-9]+):(?<raddr>.*)?:(?<rport>[0-9]+)$/
-				&& $+{dport} < 65536 && $+{rport} < 65536);
-		my $dport = $+{dport};
-		my $rem = ( $+{raddr} || 'localhost' ) . ":$+{rport}";
 	}
 	when ('passive') {
-		print "running in passive mode\n";
+		my $serv = $ENV{'SERVICE'} || '[::]:23461';
+		AE::log fatal => 'env SERVICE not set correctly ([host:]serv)'
+			unless ($serv =~ RE_SERVICE);
 
-		my $port = $ENV{'PORT'} || '23461';
-		die 'env PORT not set to a suitable TCP port number'
-			unless ($port =~ /^[0-9]+$/ && $port < 65536);
+		$sock = tcp_server($+{host} || '::', $+{serv}, sub {
+			my ($fh, $host, $port) = @_;
 
-		$sock = IO::Socket::INET->new(
-			Listen		=> 5,
-			LocalPort	=> $port,
-			Proto		=> 'tcp',
-			ReuseAddr	=> 1,
-		) or die "unable to bind() on $port/tcp: $@\n";
-
-		$sel_rd->add($sock);
-	}
-}
-
-my $running = 1;
-$SIG{__DIE__} = \&confess;
-$SIG{CHLD} = \&sigchld;
-
-while ($running) {
-	my ($r, $w, $e) = IO::Select::select($sel_rd, $sel_wr, $sel_ex);
-
-	foreach my $fh (@$e) {
-		recv $fh, undef, 0 ,0;
-		warn "socket ${fh->file} exception: $!";
-		&closestream($fh);
-	}
-
-	foreach my $fh (@$w) {
-		sendmsg($fh, 'Hello', message => 'expected Hello message');
-	}
-
-	foreach my $fh (@$r) {
-		# new client
-		if ($fh == $sock) {
-			my $c = $fh->accept;
-			$sel_rd->add($c);
-			$sel_ex->add($c);
-			next;
-		}
-
-		# new udp packet
-		if (defined($map{$fh->fileno})) {
-			&egress($fh);
-			next;
-		}
-
-		if ($mode eq 'active') {
-			
-		}
-
-		# handshaking new stream
-		my $message;
-		unless (defined(recvmsg($fh, \$message)) && ref $message->{content} eq 'HASH') {
-			&closestream($fh);
-			next;
-		}
-
-		unless ($message->{type} eq 'Hello') {
-			sendmsg($fh, 'Error', message => 'expected Hello message');
-			&closestream($fh);
-			next;
-		}
-
-		my $u = IO::Socket::INET->new(
-			LocalPort	=> $message->{content}{port},
-			PeerAddr	=> $message->{content}{daddress},
-			Proto		=> 'udp',
-			PeerPort	=> $message->{content}{dport},
-		);
-		if (defined($u)) {
-			if ($u->sockhost eq $u->peerhost && $u->sockport == $u->peerport) {
-				warn 'loop detected!';
-				sendmsg($fh, 'Error', message => 'loop requested');
-				$u->close;
-				&closestream($fh);
-				next;
-			}
-
-			$map{$u->fileno} = {
-				sock	=> $u,
-				port	=> $message->{content}{port},
-				daddr	=> $message->{content}{daddress},
-				dport	=> $message->{content}{dport},
-				token	=> Data::GUID->new->as_string,
-				feeds	=> { },
-				pids	=> { },
-				order	=> [ ],
+			my $handle = AnyEvent::Handle->new(fh => $fh);
+			$stream{$fh->fileno} = {
+				handle	=> $handle,
+				state	=> 'new',
 			};
 
-			$sel_rd->add($u);
-		} else {
-			unless (defined($message->{content}{token})) {
-				sendmsg($fh, 'Error', message => 'token required');
-				&closestream($fh);
-				next;
-			}
+			$handle->on_error(sub {
+				AE::log $_[1] ? 'fatal' : 'error' => 'stream: ' . $_[2];
+				delete $stream{$_[0]->fileno};
+			});
+			$handle->on_read(sub {
+				my ($tb,$tag) = asn_decode_tag($_[0]->{rbuf})
+					or return;
+				my ($lb,$len) = asn_decode_length(substr($_[0]->{rbuf}, $tb, 8))
+					or return;
+				return if (length($_[0]->{rbuf}) < $tb + $lb + $len);
 
-			foreach my $k (keys %map) {
-				next unless ($message->{content}{port} eq $map{$k}{port}
-						&& $message->{content}{daddress} eq $map{$k}{daddr}
-						&& $message->{content}{dport} eq $map{$k}{dport});
+				my $m = $msg->decode($_[0]->{rbuf});
+				$_[0]->{rbuf} = substr $_[0]->{rbuf}, $tb + $lb + $len;
 
-				unless ($message->{content}{token} eq $map{$k}{token}) {
-					warn 'bad token';
-					sendmsg($fh, 'Error', message => 'bad token');
-					last;
-				}
+				recvmsg($_[0], $m);
 
-				$u = $map{$k}{sock};
-				last;
-			}
-
-			unless (defined($u)) {
-				warn "unable to bind ${\$message->{content}{port}}/udp: $@";
-				sendmsg($fh, 'Error', message => 'unable to bind to port');
-				&closestream($fh);
-				next;
-			}
-		}
-
-		my $pid = fork;
-		unless (defined($pid)) {
-			warn 'unable to fork';
-			sendmsg($fh, 'Error', message => 'unable to fork');
-			&closestream($fh);
-			next;
-		}
-
-		if ($pid == 0) {
-			STDIN->close;
-
-			my @h = $sel_rd->handles;
-			push @h, $sel_wr->handles;
-
-			$_->close
-				foreach (grep { !($_->fileno ~~ [ $fh->fileno, $u->fileno ]) } @h);
-
-			&ingress($fh, $u);
-		}
-
-		$map{$u->fileno}{feeds}{$fh->fileno} = $fh;
-		$map{$u->fileno}{pids}{$pid} = $fh->fileno;
-		unshift @{$map{$u->fileno}{order}}, $fh->fileno;
-
-		$sel_rd->remove($fh);
-		$sel_ex->remove($fh);
-
-		next;
+				1;
+			});
+			$handle->on_eof(sub {
+				AE::log error => 'stream closing';
+				$_[0]->push_shutdown;
+				delete $stream{$_[0]->fh->fileno};
+			});
+		});
 	}
 }
 
-exit 0;
-
-sub sigchld {
-	local ($!, $?);
-
-	while ((my $pid = waitpid(-1, WNOHANG)) > 0) {
-		my $fd = shift (grep { defined($map{$_}{pids}{$pid}) } keys %map)
-			or die 'orphaned child died';
-
-		my $fh = $map{$fd}{feeds}{$map{$_}{pids}{$pid}};
-		delete $map{$fd}{pids}{$pid};
-
-		&closestream($fh);
-	}
-}
-
-sub closestream {
-	my $fh = shift;
-
-	my $mfd = shift (grep { defined($map{$_}{feeds}{$fh->fileno}) } keys %map)
-		or die 'closestream called for non-existent fh';
-
-	$sel_rd->remove($fh);
-	$sel_ex->remove($fh);
-	$fh->close;
-
-	@{$map{$mfd}{order}} = grep { $_ != $fh->fileno } @{$map{$mfd}{order}};
-	delete $map{$mfd}{feeds}{$fh->fileno};
-
-	return if (scalar(keys %{$map{$mfd}{feeds}}) > 0);
-
-	warn "no longer using \${$map{$mfd}{port}}/udp, closing\n";
-	$map{$mfd}{sock}->close;
-	delete $map{$mfd};
-};
-
-sub ingress {
-	my ($tcp, $udp) = @_;
-
-	sendmsg($tcp, 'Connected', token => $map{$udp->fileno}{token});
-
-	while (1) {
-		my $message;
-		last unless (defined(recvmsg($tcp, \$message)) && ref $message->{content} eq 'HASH');
-
-		send $udp, $message->{content}{payload}, 0;
-	}
-
-	warn 'connection closed';
-
-	$tcp->close;
-
-	exit 0;
-}
-
-sub egress {
-	my $u = shift;
-}
+AnyEvent->condvar->recv;
 
 sub sendmsg {
-	my ($sock, $type, %payload) = @_;
+	my ($handle, $type, %payload) = @_;
 
-	die "handler '$type' not found"
+	AE::log fatal => "handler '$type' not found"
 		unless (defined($oidfwd{$type}));
 
 	my $m = $msg->encode(type => $oidfwd{$type}, content => \%payload);
-	die "unable to create '$type' Message"
+	AE::log fatal => "unable to create '$type' Message"
 		unless (defined($m));
 
-	return asn_send($sock, $m);
+	$handle->push_write($m);
 }
 
 sub recvmsg {
-	my ($sock, $buf) = @_;
+	my ($handle, $message) = @_;
 
-	my $sin = asn_recv $sock, my $b, 0;
-	return unless (defined($sin));
+	AE::log fatal => 'non-decodable message'
+		unless (defined($message));
 
-	my $p = $msg->decode($b);
-
-	my $t = $oidrev{$p->{type}};
+	my $t = $oidrev{$message->{type}};
 	unless (defined($t)) {
-		warn "unknown OID '\${$p->{type}}'";
+		AE::log warn => 'unknown OID: ' . $message->{type};
 		return;
 	}
 
-	$p->{type} = $t;
-
-	$$buf = $p;
-
-	return $sin;
-}
-
-BEGIN {
-	# http://www.perlmonks.org/?node_id=581062
-	{
-		package NBCSocket;
-		use IO::Socket::INET;
-		use Errno;
-		use Carp;
-		our @ISA = 'IO::Socket::INET';
-		sub connect {
-			@_ == 2 or croak 'usage: $sock->connect(NAME)';
-			my $sock = shift;
-			my $addr = shift;
-			my $timeout = ${*$sock}{'io_socket_timeout'};
-			my $err;
-			my $blocking;
-			$blocking = $sock->blocking(0);
-			if (!connect($sock, $addr)) {
-				if (!$!{EINPROGRESS}) {
-					$err = $!;
-					$@ = "connect: $!";
-				}
+	given ($stream{$handle->fh->fileno}{state}) {
+		when ('new') {
+			unless ($t eq 'Hello') {
+				AE::log error => "expected Hello message, got $t";
+				sendmsg($handle, 'Error', message => 'expected Hello message');
+				$handle->push_shutdown;
+				break;
 			}
-			$! = $err if $err;
-			$err ? undef : $sock;
+
+			&hookup($handle, $message);
+
+			$stream{$handle->fh->fileno}{state} = 'member';
+		}
+		when ('member') {
+			unless ($t eq 'Data') {
+				AE::log error => "expected Data message, got $t";
+				sendmsg($handle, 'Error', message => 'expected Data message');
+				$handle->push_shutdown;
+				break;
+			}
+
+			my $ufd = (grep { $handle->fh->fileno ~~ [ @{$map{$_}{feed}} ] } keys %map)[0];
+			unless (defined($ufd)) {
+				AE::log error => "orphaned fh";
+				sendmsg($handle, 'Error', message => 'orphaned fh');
+				$handle->push_shutdown;
+				break;
+			}
+
+			$map{$ufd}{handle}->push_send($message->{content}{payload});
+		}
+		default {
+			AE::log error => "unexpected $t message";
+			sendmsg($handle, 'Error', message => "unexpected $t message");
+			$handle->push_shutdown;
 		}
 	}
+}
+
+sub hookup {
+	my ($handle, $message) = @_;
+
+	my $tuple = join ' ', $message->{content}{host}, $message->{content}{service},
+				$message->{content}{rhost}, $message->{content}{rservice};
+	my $ufd = (grep { $map{$_}{tuple} eq $tuple } keys %map)[0];
+	if (defined($ufd)) {
+		unless (defined($message->{content}{token}) && $map{$ufd}{token} eq $message->{content}{token}) {
+			AE::log note => 'missing or invalid token';
+			sendmsg($handle, 'Error', message => 'requires valid token');
+			$handle->push_shutdown;
+			return;
+		}
+
+		push @{$map{$ufd}{feed}}, $handle->fh->fileno;
+	} else {
+		my $fh = IO::Socket::INET->new(
+			LocalHost	=> $message->{content}{host},
+			PeerHost	=> $message->{content}{rhost},
+			Proto		=> 'udp',
+			LocalPort	=> $message->{content}{service},
+			PeerPort	=> $message->{content}{rservice},
+		) or AE::log fatal => "bind: $@";
+
+		my $uhandle = AnyEvent::Handle::UDP->new(
+			fh		=> $fh,
+			on_error	=> sub {
+				AE::log $_[1] ? 'fatal' : 'error' => $_[2];
+			},
+			on_recv		=> sub {
+				my ($data, $hdl, $src) = @_;
+			},
+		);
+
+		$ufd = $uhandle->fh->fileno;
+
+		$map{$ufd} = {
+			handle	=> $uhandle,
+			token	=> Data::GUID->new->as_string,
+			tuple	=> $tuple,
+			feed	=> [ $handle->fh->fileno ],
+		};
+	}
+
+	sendmsg($handle, 'Connected', token => $map{$ufd}{token});
 }
 
 __DATA__
@@ -387,9 +281,10 @@ Message ::= SEQUENCE {
 -- socktopusHello OBJECT IDENTIFIER ::= { socktopus 1 }
 Hello ::= SEQUENCE {
 	version INTEGER,
-	port IA5String,
-	daddress IA5String,
-	dport IA5String,
+	host IA5String,
+	service IA5String,
+	rhost IA5String,
+	rservice IA5String,
 	token IA5String OPTIONAL
 }
 

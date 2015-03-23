@@ -21,6 +21,7 @@ Anyone finding they are hitting a choke point between their endpoints whilst try
  * [URI](http://search.cpan.org/~ether/URI/lib/URI.pm)
  * [Data::GUID](http://search.cpan.org/~rjbs/Data-GUID/lib/Data/GUID.pm)
  * [Convert::ASN1](http://search.cpan.org/~gbarr/Convert-ASN1/lib/Convert/ASN1.pod)
+ * [AnyEvent](http://software.schmorp.de/pkg/AnyEvent.html)
 
 Start off by fetching the source:
 
@@ -29,22 +30,24 @@ Start off by fetching the source:
 ## Debian 'wheezy' 7.x
 
     sudo apt-get update
-    sudo apt-get install -yy --no-install-recommends perl liburi-perl libdata-guid-perl libconvert-asn1-perl
+    sudo apt-get install -yy --no-install-recommends perl liburi-perl libdata-guid-perl libconvert-asn1-perl libanyevent-perl cpanminus
+    sudo cpanm AnyEvent::Handle::UDP
 
 # Usage
 
 Connector (active) end that calls out to a passive instance:
 
-    env UDPLOC=23461:127.0.0.1:1234 UDPREM=23461:192.0.2.8:1234 ./socktopus tcp://192.0.2.1:23461 ...
+    env AE_LOG=main=+log UDPLOC=23461:127.0.0.1:1234 UDPREM=23461:192.0.2.8:1234 ./socktopus tcp://192.0.2.1:23461 ...
 
 Listener (passive) end that receives connections:
 
-    env PORT=23461 ./socktopus
+    env AE_LOG=main=+log SERVICE=23461 ./socktopus
 
 Notes of interest:
+
  - if no arguments are present, the process goes into listener mode
  - arguments when present are of the form of a TCP URI with port
- - `PORT` is where the local TCP socket where the connector reaches out to (over multiple paths) - this is the first argument passed to the connector
+ - `SERVICE` is where the local TCP socket where the connector reaches out to (over multiple paths) - this is the first argument passed to the connector
  - `UDPLOC` is the local end of the port to set up by the connector
  - `UDPREM` is the port number to request the listener relays the traffic out on
 
