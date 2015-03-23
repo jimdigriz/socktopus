@@ -151,7 +151,7 @@ given ($mode) {
 					or return;
 				return if (length($_[0]->{rbuf}) < $tb + $lb + $len);
 
-				my $m = $msg->decode($_[0]->{rbuf});
+				my $m = $msg->decode(substr $_[0]->{rbuf}, 0, $tb + $lb + $len);
 				$_[0]->{rbuf} = substr $_[0]->{rbuf}, $tb + $lb + $len;
 
 				recvmsg($_[0], $m);
