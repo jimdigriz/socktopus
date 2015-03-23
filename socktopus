@@ -161,7 +161,6 @@ given ($mode) {
 			});
 			$handle->on_eof(sub {
 				AE::log error => 'stream closing';
-				$_[0]->push_shutdown;
 				&streamclose($_[0]);
 			});
 		});
@@ -202,26 +201,23 @@ sub recvmsg {
 			unless ($t eq 'Hello') {
 				AE::log error => "expected Hello message, got $t";
 				sendmsg($handle, 'Error', message => 'expected Hello message');
-				$handle->push_shutdown;
+				&streamclose($handle);
 				break;
 			}
 
 			unless ($message->{content}{version} == 0) {
 				AE::log warn => "client requests unsupported version ${\$message->{content}{version}}";
 				sendmsg($handle, 'Error', message => 'unsupported version');
-				$handle->push_shutdown;
+				&streamclose($handle);
 				break;
 			}
 
 			&streamconnect($handle, $message);
-
-			$stream{$handle->fh->fileno}{state} = 'member';
 		}
 		when ('member') {
 			unless ($t eq 'Data') {
 				AE::log error => "expected Data message, got $t";
 				sendmsg($handle, 'Error', message => 'expected Data message');
-				$handle->push_shutdown;
 				break;
 			}
 
@@ -229,7 +225,7 @@ sub recvmsg {
 			unless (defined($ufd)) {
 				AE::log error => 'orphaned fh';
 				sendmsg($handle, 'Error', message => 'orphaned fh');
-				$handle->push_shutdown;
+				&streamclose($handle);
 				break;
 			}
 
@@ -238,7 +234,7 @@ sub recvmsg {
 		default {
 			AE::log error => "unexpected $t message";
 			sendmsg($handle, 'Error', message => "unexpected $t message");
-			$handle->push_shutdown;
+			&streamclose($handle);
 		}
 	}
 }
@@ -253,7 +249,6 @@ sub streamconnect {
 		unless (defined($message->{content}{token}) && $map{$ufd}{token} eq $message->{content}{token}) {
 			AE::log note => 'missing or invalid token';
 			sendmsg($handle, 'Error', message => 'requires valid token');
-			$handle->push_shutdown;
 			return;
 		}
 
@@ -293,21 +288,22 @@ sub streamconnect {
 	}
 
 	sendmsg($handle, 'Connected', token => $map{$ufd}{token});
+
+	$stream{$handle->fh->fileno}{state} = 'member';
 }
 
 sub streamclose {
 	my $handle = shift;
 
 	my $ufd = (grep { $handle->fh->fileno ~~ [ @{$map{$_}{feed}} ] } keys %map)[0];
-	unless (defined($ufd)) {
-		AE::log fatal => 'orphaned fh';
-		return;
-	}
+
+	delete $stream{$handle->fh->fileno};
+	$handle->destroy;
+
+	return unless (defined($ufd));
 
 	@{$map{$ufd}{feed}} = grep { $_ != $handle->fh->fileno } @{$map{$ufd}{order}};
 	@{$map{$ufd}{order}} = grep { $_ != $handle->fh->fileno } @{$map{$ufd}{feed}};
-
-	delete $stream{$handle->fh->fileno};
 
 	return if (@{$map{$ufd}{order}});
 
