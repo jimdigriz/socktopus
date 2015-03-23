@@ -294,9 +294,12 @@ sub streamconnect {
 sub streamclose {
 	my ($handle) = @_;
 
+	$handle->on_drain(sub {
+		delete $stream{$_[0]->fh->fileno};
+		undef $_[0];
+	});
+
 	my $sfd = $handle->fh->fileno;
-	$handle->destroy;
-	delete $stream{sfd};
 
 	my $ufd = (grep { $sfd ~~ [ @{$map{$_}{feed}} ] } keys %map)[0];
 	return unless (defined($ufd));
