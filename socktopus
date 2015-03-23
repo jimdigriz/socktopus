@@ -24,8 +24,6 @@ use constant SOCKTOPUS_OID	=> '2.25.97532385673460346314207847258541901083';
 use constant RE_UDP		=> qr/^(?:\[?(?<host>[^\]]+)\]?:)?(?:(?<serv>[a-z0-9-]+):)?(?:\[?(?<rhost>[^\]]+)\]?:)?(?<rserv>[a-z0-9-]+)$/;
 use constant RE_SERVICE		=> qr/^(?:\[?(?<host>[^\]]+)\]?:)?(?<serv>[a-z0-9-]+)$/;
 
-my $data_start = tell DATA;
-
 AnyEvent::Log::ctx->fmt_cb(sub { \@_ });
 AnyEvent::Log::ctx->log_cb(sub {
 	my $m = $AnyEvent::Log::LEVEL2STR[$_[0]->[2]] . ' ' . $_[0]->[3];
@@ -41,23 +39,29 @@ AnyEvent::Log::ctx->log_cb(sub {
 	1;
 });
 
+open my $asn1, '<', 'socktopus.asn1'
+	or die "unable to open: $!";
+
 my $asn = Convert::ASN1->new(tagdefault => 'EXPLICIT');
-$asn->prepare(\*DATA)
-	or AE::log fatal => 'ASN1 bust: ' . $asn->error;
-seek DATA, $data_start, 0;
+$asn->prepare($asn1)
+	or die 'ASN1 bust: ' . $asn->error;
+
+seek $asn1, 0, 0;
 
 my %oidfwd;
-while (<DATA>) {
+while (<$asn1>) {
 	next unless /^--\s+socktopus([a-zA-Z0-9]+)\s+OBJECT IDENTIFIER\s+::=\s+{\s+socktopus\s+(\d+)\s+}$/;
 
 	$oidfwd{$1} = SOCKTOPUS_OID . '.' . $2;
 
 	my $h = $asn->find($1)
-		or AE::log fatal => "'$1' handler not found";
+	or die "'$1' handler not found";
 
 	$asn->registeroid($oidfwd{$1}, $h);
 }
 my %oidrev = reverse %oidfwd;
+
+close $asn1;
 
 my $msg = $asn->find('Message')
 	or AE::log fatal => "'Message' handler not found";
@@ -157,6 +161,8 @@ given ($mode) {
 }
 
 AnyEvent->condvar->recv;
+
+exit 0;
 
 sub sendmsg {
 	my ($handle, $type, %payload) = @_;
@@ -267,42 +273,4 @@ sub hookup {
 	}
 
 	sendmsg($handle, 'Connected', token => $map{$ufd}{token});
-}
-
-__DATA__
--- 49600de0-cfcb-11e4-ad23-0002a5d5c51b
--- socktopus { joint-iso-itu-t(2) uuid(25) socktopus(97532385673460346314207847258541901083) }
-
-Message ::= SEQUENCE {
-	type OBJECT IDENTIFIER,
-	content ANY DEFINED BY type
-}
-
--- socktopusHello OBJECT IDENTIFIER ::= { socktopus 1 }
-Hello ::= SEQUENCE {
-	version INTEGER,
-	host IA5String,
-	service IA5String,
-	rhost IA5String,
-	rservice IA5String,
-	token IA5String OPTIONAL
-}
-
--- socktopusError OBJECT IDENTIFIER ::= { socktopus 2 }
-Error ::= SEQUENCE {
-	message PrintableString
-}
-
--- socktopusConnected OBJECT IDENTIFIER ::= { socktopus 3 }
-Connected ::= SEQUENCE {
-	token IA5String
-}
-
--- socktopusData OBJECT IDENTIFIER ::= { socktopus 4 }
-Data ::= SEQUENCE {
-	sequence SEQUENCE {
-		global INTEGER,
-		local INTEGER
-	},
-	payload OCTET STRING
 }

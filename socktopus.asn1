@@ -1,0 +1,36 @@
+-- 49600de0-cfcb-11e4-ad23-0002a5d5c51b
+-- socktopus { joint-iso-itu-t(2) uuid(25) socktopus(97532385673460346314207847258541901083) }
+
+Message ::= SEQUENCE {
+	type OBJECT IDENTIFIER,
+	content ANY DEFINED BY type
+}
+
+-- socktopusHello OBJECT IDENTIFIER ::= { socktopus 1 }
+Hello ::= SEQUENCE {
+	version INTEGER,
+	host IA5String,
+	service IA5String,
+	rhost IA5String,
+	rservice IA5String,
+	token IA5String OPTIONAL
+}
+
+-- socktopusError OBJECT IDENTIFIER ::= { socktopus 2 }
+Error ::= SEQUENCE {
+	message PrintableString
+}
+
+-- socktopusConnected OBJECT IDENTIFIER ::= { socktopus 3 }
+Connected ::= SEQUENCE {
+	token IA5String
+}
+
+-- socktopusData OBJECT IDENTIFIER ::= { socktopus 4 }
+Data ::= SEQUENCE {
+	sequence SEQUENCE {
+		global INTEGER,
+		local INTEGER
+	},
+	payload OCTET STRING
+}
