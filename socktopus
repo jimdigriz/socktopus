@@ -40,11 +40,11 @@ AnyEvent::Log::ctx->log_cb(sub {
 });
 
 open my $asn1, '<', 'socktopus.asn1'
-	or die "unable to open: $!";
+	or AE::log fatal => "unable to open: $!";
 
 my $asn = Convert::ASN1->new(tagdefault => 'EXPLICIT');
 $asn->prepare($asn1)
-	or die 'ASN1 bust: ' . $asn->error;
+	or AE::log fatal => 'ASN1 bust: ' . $asn->error;
 
 seek $asn1, 0, 0;
 
@@ -55,7 +55,7 @@ while (<$asn1>) {
 	$oidfwd{$1} = SOCKTOPUS_OID . '.' . $2;
 
 	my $h = $asn->find($1)
-	or die "'$1' handler not found";
+		or AE::log fatal => "'$1' handler not found";
 
 	$asn->registeroid($oidfwd{$1}, $h);
 }
