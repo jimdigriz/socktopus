@@ -115,9 +115,17 @@ given ($mode) {
 		);
 
 		$map{$handle->fh->fileno} = {
-			hdl	=> $handle,
+			handle	=> $handle,
+			tuple	=> join(' ', $host, $serv, $rhost, $+{rserv}),
+			rhost	=> $fh->peerhost,
+			rserv	=> $fh->peerport,
 			token	=> Data::GUID->new->as_string,
+			feed	=> [ ],
+			order	=> [ ],
 		};
+
+		# disconnect to avoid fatal 'connection refused'
+		$fh->connect(pack('S n L x8', AF_UNSPEC, 0, 0));
 	}
 	when ('passive') {
 		my $serv = $ENV{'SERVICE'} || '[::]:23461';
@@ -218,7 +226,7 @@ sub recvmsg {
 				break;
 			}
 
-			$map{$ufd}{handle}->push_send($message->{content}{payload});
+			$map{$ufd}{handle}->push_send($message->{content}{payload}, [ $map{$ufd}{rhost}, $map{$ufd}{rserv} ]);
 		}
 		default {
 			AE::log error => "unexpected $t message";
@@ -266,10 +274,15 @@ sub hookup {
 
 		$map{$ufd} = {
 			handle	=> $uhandle,
-			token	=> Data::GUID->new->as_string,
 			tuple	=> $tuple,
+			rhost	=> $fh->peerhost,
+			rserv	=> $fh->peerport,
+			token	=> Data::GUID->new->as_string,
 			feed	=> [ $handle->fh->fileno ],
+			order	=> [ ],
 		};
+
+		$fh->connect(pack('S n L x8', AF_UNSPEC, 0, 0));
 	}
 
 	sendmsg($handle, 'Connected', token => $map{$ufd}{token});
