@@ -13,9 +13,10 @@ use AnyEvent::Socket;
 use AnyEvent::Handle::UDP;
 use IO::Socket::INET;
 use Data::GUID;
-use Convert::ASN1 qw/:tag/;
+use Convert::ASN1 qw(:tag);
 use Carp;
-use POSIX qw/strftime/;
+use POSIX qw(strftime);
+use Socket qw(SOL_SOCKET SO_RCVBUF SO_SNDBUF);
 
 use Data::Dumper;
 
@@ -133,6 +134,13 @@ given ($mode) {
 
 		$sock = tcp_server($+{host} || '::', $+{serv}, sub {
 			my ($fh, $host, $port) = @_;
+
+			# TODO AnyEvent::Socket->tcp_congestion
+
+			$fh->setsockopt(SOL_SOCKET, SO_RCVBUF, 5*1024)
+				or AE::log warn => "unable to set SO_RCVBUF=5kB: $!";
+			$fh->setsockopt(SOL_SOCKET, SO_SNDBUF, 5*1024)
+				or AE::log warn => "unable to set SO_SNDBUF=5kB: $!";
 
 			my $handle = AnyEvent::Handle->new(fh => $fh);
 			$stream{$fh->fileno} = {
@@ -320,10 +328,13 @@ sub forward {
 
 	# TODO check from expected source or use BPF
 
+	# TODO active side to open streams here
+
 	my $ufd = $handle->fh->fileno;
 	foreach my $fd (@{$map{$ufd}{order}}) {
 		vec(my $win = '', $stream{$fd}{handle}->fh->fileno, 1) = 1;
 		if (select(undef, $win, undef, 0)) {
+			# TODO wbuf_max seems not to work
 			sendmsg($stream{$fd}{handle}, 'Data', sequence => { global => -1, local => -1 }, payload => $data);
 			last;
 		}
