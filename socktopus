@@ -330,6 +330,8 @@ sub forward {
 
 	# TODO active side to open streams here
 
+	# TODO direct a<->b is sticky at the front
+
 	my $ufd = $handle->fh->fileno;
 	foreach my $fd (@{$map{$ufd}{order}}) {
 		vec(my $win = '', $stream{$fd}{handle}->fh->fileno, 1) = 1;
