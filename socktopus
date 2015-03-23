@@ -160,7 +160,7 @@ given ($mode) {
 				1;
 			});
 			$handle->on_eof(sub {
-				AE::log error => 'stream closing';
+				AE::log error => 'EOF, closing';
 				&streamclose($_[0]);
 			});
 		});
@@ -295,17 +295,17 @@ sub streamconnect {
 sub streamclose {
 	my $handle = shift;
 
-	my $ufd = (grep { $handle->fh->fileno ~~ [ @{$map{$_}{feed}} ] } keys %map)[0];
-
-	delete $stream{$handle->fh->fileno};
+	my $sfd = $handle->fh->fileno;
 	$handle->destroy;
+	delete $stream{sfd};
 
+	my $ufd = (grep { $sfd ~~ [ @{$map{$_}{feed}} ] } keys %map)[0];
 	return unless (defined($ufd));
 
-	@{$map{$ufd}{feed}} = grep { $_ != $handle->fh->fileno } @{$map{$ufd}{order}};
-	@{$map{$ufd}{order}} = grep { $_ != $handle->fh->fileno } @{$map{$ufd}{feed}};
+	@{$map{$ufd}{feed}} = grep { $_ != $sfd } @{$map{$ufd}{feed}};
+	@{$map{$ufd}{order}} = grep { $_ != $sfd } @{$map{$ufd}{order}};
 
-	return if (@{$map{$ufd}{order}});
+	return if (@{$map{$ufd}{feed}});
 
 	AE::log note => 'no longer using UDP socket, closing';
 
