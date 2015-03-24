@@ -12,7 +12,7 @@ use AnyEvent::Handle;
 use AnyEvent::Socket;
 use AnyEvent::Handle::UDP;
 use IO::Socket::INET;
-use Data::GUID;
+use Data::GUID qw(guid_string);
 use Convert::ASN1 qw(:tag);
 use Carp;
 use POSIX qw(strftime);
@@ -116,7 +116,7 @@ given ($mode) {
 			tuple	=> join(' ', $host, $serv, $rhost, $+{rserv}),
 			rhost	=> $fh->peerhost,
 			rserv	=> $fh->peerport,
-			token	=> Data::GUID->new->as_string,
+			token	=> guid_string,
 			feed	=> [ ],
 			order	=> [ ],
 		};
@@ -283,7 +283,7 @@ sub streamconnect {
 			tuple	=> $tuple,
 			rhost	=> $fh->peerhost,
 			rserv	=> $fh->peerport,
-			token	=> Data::GUID->new->as_string,
+			token	=> guid_string,
 			feed	=> [ $handle->fh->fileno ],
 			order	=> [ $handle->fh->fileno ],
 		};
