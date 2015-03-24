@@ -333,7 +333,6 @@ sub forward {
 	foreach my $fd (@{$map{$ufd}{order}}) {
 		vec(my $win = '', $stream{$fd}{handle}->fh->fileno, 1) = 1;
 		if (select(undef, $win, undef, 0)) {
-			# TODO wbuf_max seems not to work
 			sendmsg($stream{$fd}{handle}, 'Data', sequence => { global => -1, local => -1 }, payload => $data);
 			last;
 		}
