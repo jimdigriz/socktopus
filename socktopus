@@ -79,7 +79,7 @@ foreach my $a (@ARGV) {
 my $mode = (scalar(@uri)) ? 'active' : 'passive';
 AE::log info => "running $mode";
 
-my ($sock, %stream, %map);
+my (%stream, %map);
 given ($mode) {
 	when ('active') {
 		AE::log warn => "first URI ('$uri[0]') should be TCP"
@@ -129,7 +129,7 @@ given ($mode) {
 		AE::log fatal => 'env SERVICE not set correctly ([host:]serv)'
 			unless ($serv =~ RE_SERVICE);
 
-		$sock = tcp_server($+{host} || '::', $+{serv}, sub {
+		tcp_server($+{host} || '::', $+{serv}, sub {
 			my ($fh, $host, $port) = @_;
 
 			# TODO AnyEvent::Socket->tcp_congestion
