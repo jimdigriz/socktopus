@@ -137,9 +137,9 @@ given ($mode) {
 
 			# TODO AnyEvent::Socket->tcp_congestion
 
-			$fh->setsockopt(SOL_SOCKET, SO_RCVBUF, 5*1024)
+			setsockopt($fh, SOL_SOCKET, SO_RCVBUF, 5*1024)
 				or AE::log warn => "unable to set SO_RCVBUF=5kB: $!";
-			$fh->setsockopt(SOL_SOCKET, SO_SNDBUF, 5*1024)
+			setsockopt($fh, SOL_SOCKET, SO_SNDBUF, 5*1024)
 				or AE::log warn => "unable to set SO_SNDBUF=5kB: $!";
 
 			my $handle = AnyEvent::Handle->new(fh => $fh);
