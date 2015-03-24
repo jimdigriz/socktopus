@@ -36,7 +36,7 @@ Start off by fetching the source which requires you to [have git installed on yo
 
 Connector (active) end that calls out to a passive instance:
 
-    env AE_LOG=main=+log UDPLOC=127.0.0.1:23461:127.0.0.1:1234 UDPREM=127.0.0.1:23461:192.0.2.8:1234 ./socktopus tcp://192.0.2.1:23461 ...
+    env AE_LOG=main=+log UDPLOC=1234 UDPREM=1235:1236 ./socktopus tcp://127.0.0.1
 
 Listener (passive) end that receives connections:
 
@@ -44,13 +44,14 @@ Listener (passive) end that receives connections:
 
 Notes of interest:
 
+ - logging is controlled by the environment variable [`AE_LOG`](http://pod.tst.eu/http://cvs.schmorp.de/AnyEvent/lib/AnyEvent/Log.pm#CONFIGURATION_VIA_ENV_PERL_ANYEVENT_)
  - if no arguments are present, the process goes into listener mode
- - arguments when present are of the form of URIs
+ - arguments are URIs
  - the first URI is the destination host you are connecting to and *must* be a `tcp` URI
- - `SERVICE` is where the local TCP socket that the connector reaches out to (over multiple paths)
- - `UDPLOC` is the local end of the port to set up by the connector
- - `UDPREM` is the port number to request the listener relays the traffic out on
+ - `SERVICE` is the TCP listening socket, takes the syntax `[host:][serv]` where `host` defaults to `[::]` and `serv` to `23461`
  - `UDP{LOC,REM}` take the syntax `[host:][serv:][rhost:]rserv`, where `(r)host` defaults to `localhost` and `serv` defaults to `23461`
+ - `UDPLOC` describes the local source host/port and destination host/port tuple
+ - `UDPREM` describes the remote source host/port and destination host/port tuple
 
 One use case for the UDP data channel created is to run [VTun](http://vtun.sourceforge.net/) providing you with a high-throughput network interface.
 
