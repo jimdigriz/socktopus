@@ -15,9 +15,8 @@ Anyone finding they are hitting a choke point between their endpoints whilst try
 
 # Pre-flight
 
-`socktopus` requires the following libraries:
+`socktopus` requires [Perl 5.14 or higher](https://www.perl.org/) and the following libraries:
 
- * [Perl 5.14 or higher](https://www.perl.org/)
  * [URI](http://search.cpan.org/~ether/URI/lib/URI.pm)
  * [Data::GUID](http://search.cpan.org/~rjbs/Data-GUID/lib/Data/GUID.pm)
  * [Convert::ASN1](http://search.cpan.org/~gbarr/Convert-ASN1/lib/Convert/ASN1.pod)
@@ -57,10 +56,10 @@ One use case for the UDP data channel created is to run [VTun](http://vtun.sourc
 
 The URI looks like (path componment is ignored):
 
-    socks://node.example.com:1234
+    tcp://host.example.com:1234
 
 The following URI schemes are supported:
 
  * **`tcp` (default port: 23461):** connecting to this raw TCP socket will proxy/NAT you to your destination but of course requires you to set up something like [iptables DNAT](http://linux-ip.net/html/nat-dnat.html) or [xinetd redirect](http://azouhr.wordpress.com/2012/06/21/port-forwarding-with-xinetd/) on the node to do the forwarding for you
- * **`socks` (default port: 1080):** SOCKS5 server but you can also use [`socks4`](http://en.wikipedia.org/wiki/SOCKS_(protocol)#SOCKS4)
- * **`http` (default port: 8080):** HTTP proxy that supports the [CONNECT method](http://en.wikipedia.org/wiki/HTTP_tunnel#HTTP_CONNECT_Tunneling)
+ * **`socks` (default port: 1080) [not supported]:** [SOCKS server](http://en.wikipedia.org/wiki/SOCKS_(protocol))
+ * **`http` (default port: 8080) [not supported]:** HTTP proxy that supports the [CONNECT method](http://en.wikipedia.org/wiki/HTTP_tunnel#HTTP_CONNECT_Tunneling)
