@@ -22,8 +22,8 @@ use Data::Dumper;
 
 use constant SOCKTOPUS_OID	=> '2.25.97532385673460346314207847258541901083';
 
-use constant RE_UDP		=> qr/^(?:\[?(?<host>[^\]]+)\]?:)?(?:(?<serv>[a-z0-9-]+):)?(?:\[?(?<rhost>[^\]]+)\]?:)?(?<rserv>[a-z0-9-]+)$/;
-use constant RE_SERVICE		=> qr/^(?:\[?(?<host>[^\]]+)\]?:)?(?<serv>[a-z0-9-]+)$/;
+use constant RE_UDP		=> qr/^(?:\[?(?<host>[^\]]+?)\]?:)?(?:(?<serv>[a-z0-9-]+):)?(?:\[?(?<rhost>[^\]]+?)\]?:)?(?<rserv>[a-z0-9-]+)$/;
+use constant RE_SERVICE		=> qr/^(?:\[?(?<host>[^\]]+?)\]?:)?(?<serv>[a-z0-9-]+)$/;
 
 AnyEvent::Log::ctx->fmt_cb(sub { \@_ });
 AnyEvent::Log::ctx->log_cb(sub {
