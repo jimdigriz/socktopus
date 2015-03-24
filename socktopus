@@ -268,9 +268,7 @@ sub recvmsg {
 			$map{$ufd}{handle}->push_send($message->{content}{payload}, [ $map{$ufd}{rhost}, $map{$ufd}{rserv} ]);
 		}
 		default {
-			AE::log error => "unexpected $t message";
-			sendmsg($handle, 'Error', message => "unexpected $t message");
-			&streamclose($handle);
+			AE::log fatal => "unexpected $t state";
 		}
 	}
 }
