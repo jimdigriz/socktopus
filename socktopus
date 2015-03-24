@@ -270,6 +270,91 @@ sub recvmsg {
 	}
 }
 
+sub forward {
+	my ($data, $handle, $src) = @_;
+
+	# TODO check from expected source or use BPF
+
+	# TODO direct a<->b is sticky at the front
+
+	my $ufd = $handle->fh->fileno;
+	foreach my $fd (grep { $stream{$_}{state} eq 'member' } @{$map{$ufd}{order}}) {
+		vec(my $win = '', $stream{$fd}{handle}->fh->fileno, 1) = 1;
+		if (select(undef, $win, undef, 0)) {
+			# TODO handle sequence numbers to get jitter/rtt stats
+			sendmsg($stream{$fd}{handle}, 'Data', sequence => { global => -1, local => -1 }, payload => $data);
+			last;
+		}
+
+		@{$map{$ufd}{order}} = grep { $_ != $fd } @{$map{$ufd}{order}};
+		splice @{$map{$ufd}{order}}, int(rand(length(@{$map{$ufd}{order}}))), 0, $fd;
+	}
+
+	return unless ($mode eq 'active' && keys %stream < @uri);
+
+	&streamopen($ufd, $_)
+		foreach (uniq(@uri, map { $stream{$_}{uri} } keys %stream));
+}
+
+sub streamopen {
+	my ($ufd, $uri) = @_;
+
+	my ($h, $s) = split /:([^:]+)$/, $uri->authority, 2;
+	$s = '23461'
+		unless (defined($s));
+
+	tcp_connect($h, $s, sub {
+		my ($fh) = @_;
+
+		unless (defined($fh)) {
+			AE::log warn => "unable to connect: $!";
+			return;
+		}
+
+		# TODO AnyEvent::Socket->tcp_congestion
+
+		setsockopt($fh, SOL_SOCKET, SO_RCVBUF, 5*1024)
+			or AE::log warn => "unable to set SO_RCVBUF=5kB: $!";
+		setsockopt($fh, SOL_SOCKET, SO_SNDBUF, 5*1024)
+			or AE::log warn => "unable to set SO_SNDBUF=5kB: $!";
+
+		my $handle = AnyEvent::Handle->new(fh => $fh);
+		$stream{$fh->fileno} = {
+			handle	=> $handle,
+			state	=> 'egress',
+		};
+
+		$handle->on_error(sub {
+			AE::log $_[1] ? 'fatal' : 'error' => 'stream: ' . $_[2];
+			&streamclose($_[0]);
+		});
+		$handle->on_read(\&read_rbuf);
+		$handle->on_eof(sub {
+			AE::log error => 'EOF, closing';
+			&streamclose($_[0]);
+		});
+
+		$ENV{'UDPREM'} =~ RE_UDP;
+
+		my %payload = (
+			version		=> 0,
+			host		=> $+{host} || 'localhost',
+			service		=> $+{serv} || '23461',
+			rhost		=> $+{rhost} || 'localhost',
+			rservice	=> $+{rserv},
+		);
+
+		$payload{token} = $map{$ufd}{token}
+			if (defined($map{$ufd}{token}));
+
+		sendmsg($handle, 'Hello', %payload);
+	}, sub {
+		my ($fh) = @_;
+
+		5;
+	});
+}
+
 sub streamconnect {
 	my ($handle, $message) = @_;
 
@@ -345,84 +430,4 @@ sub streamclose {
 
 	$map{$ufd}{handle}->destroy;
 	delete $map{$ufd};
-}
-
-sub forward {
-	my ($data, $handle, $src) = @_;
-
-	# TODO check from expected source or use BPF
-
-	# TODO direct a<->b is sticky at the front
-
-	my $ufd = $handle->fh->fileno;
-	foreach my $fd (grep { $stream{$_}{state} eq 'member' } @{$map{$ufd}{order}}) {
-		vec(my $win = '', $stream{$fd}{handle}->fh->fileno, 1) = 1;
-		if (select(undef, $win, undef, 0)) {
-			# TODO handle sequence numbers to get jitter/rtt stats
-			sendmsg($stream{$fd}{handle}, 'Data', sequence => { global => -1, local => -1 }, payload => $data);
-			last;
-		}
-
-		@{$map{$ufd}{order}} = grep { $_ != $fd } @{$map{$ufd}{order}};
-		splice @{$map{$ufd}{order}}, int(rand(length(@{$map{$ufd}{order}}))), 0, $fd;
-	}
-
-	return unless ($mode eq 'active' && keys %stream < @uri);
-
-	foreach my $u ( uniq(@uri, map { $stream{$_}{uri} } keys %stream)) {
-		my ($h, $s) = split /:([^:]+)$/, $u->authority, 2;
-		$s = '23461'
-			unless (defined($s));
-
-		tcp_connect($h, $s, sub {
-			my ($fh) = @_;
-
-			unless (defined($fh)) {
-				AE::log warn => "unable to connect: $!";
-				return;
-			}
-
-			# TODO AnyEvent::Socket->tcp_congestion
-
-			setsockopt($fh, SOL_SOCKET, SO_RCVBUF, 5*1024)
-				or AE::log warn => "unable to set SO_RCVBUF=5kB: $!";
-			setsockopt($fh, SOL_SOCKET, SO_SNDBUF, 5*1024)
-				or AE::log warn => "unable to set SO_SNDBUF=5kB: $!";
-
-			my $handle = AnyEvent::Handle->new(fh => $fh);
-			$stream{$fh->fileno} = {
-				handle	=> $handle,
-				state	=> 'egress',
-			};
-
-			$handle->on_error(sub {
-				AE::log $_[1] ? 'fatal' : 'error' => 'stream: ' . $_[2];
-				&streamclose($_[0]);
-			});
-			$handle->on_read(\&read_rbuf);
-			$handle->on_eof(sub {
-				AE::log error => 'EOF, closing';
-				&streamclose($_[0]);
-			});
-
-			$ENV{'UDPREM'} =~ RE_UDP;
-
-			my %payload = (
-				version		=> 0,
-				host		=> $+{host} || 'localhost',
-				service		=> $+{serv} || '23461',
-				rhost		=> $+{rhost} || 'localhost',
-				rservice	=> $+{rserv},
-			);
-
-			$payload{token} = $map{$ufd}{token}
-				if (defined($map{$ufd}{token}));
-
-			sendmsg($handle, 'Hello', %payload);
-		}, sub {
-			my ($fh) = @_;
-
-			5;
-		});
-	}
 }
