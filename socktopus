@@ -17,6 +17,7 @@ use Convert::ASN1 qw(:tag);
 use Carp;
 use POSIX qw(strftime);
 use Socket qw(SOL_SOCKET SO_RCVBUF SO_SNDBUF);
+use List::MoreUtils qw(uniq);
 
 use Data::Dumper;
 
@@ -116,7 +117,6 @@ given ($mode) {
 			tuple	=> join(' ', $host, $serv, $rhost, $+{rserv}),
 			rhost	=> $fh->peerhost,
 			rserv	=> $fh->peerport,
-			token	=> guid_string,
 			feed	=> [ ],
 			order	=> [ ],
 		};
@@ -142,27 +142,14 @@ given ($mode) {
 			my $handle = AnyEvent::Handle->new(fh => $fh);
 			$stream{$fh->fileno} = {
 				handle	=> $handle,
-				state	=> 'new',
+				state	=> 'ingress',
 			};
 
 			$handle->on_error(sub {
 				AE::log $_[1] ? 'fatal' : 'error' => 'stream: ' . $_[2];
 				&streamclose($_[0]);
 			});
-			$handle->on_read(sub {
-				my ($tb,$tag) = asn_decode_tag($_[0]->{rbuf})
-					or return;
-				my ($lb,$len) = asn_decode_length(substr($_[0]->{rbuf}, $tb, 8))
-					or return;
-				return if (length($_[0]->{rbuf}) < $tb + $lb + $len);
-
-				my $m = $msg->decode(substr $_[0]->{rbuf}, 0, $tb + $lb + $len);
-				$_[0]->{rbuf} = substr $_[0]->{rbuf}, $tb + $lb + $len;
-
-				recvmsg($_[0], $m);
-
-				1;
-			});
+			$handle->on_read(\&read_rbuf);
 			$handle->on_eof(sub {
 				AE::log error => 'EOF, closing';
 				&streamclose($_[0]);
@@ -174,6 +161,23 @@ given ($mode) {
 AnyEvent->condvar->recv;
 
 exit 0;
+
+sub read_rbuf {
+	my ($handle) = @_;
+
+	my ($tb,$tag) = asn_decode_tag($handle->{rbuf})
+		or return;
+	my ($lb,$len) = asn_decode_length(substr($handle->{rbuf}, $tb, 8))
+		or return;
+	return if (length($handle->{rbuf}) < $tb + $lb + $len);
+
+	my $m = $msg->decode(substr $handle->{rbuf}, 0, $tb + $lb + $len);
+	$handle->{rbuf} = substr $handle->{rbuf}, $tb + $lb + $len;
+
+	recvmsg($handle, $m);
+
+	1;
+}
 
 sub sendmsg {
 	my ($handle, $type, %payload) = @_;
@@ -201,7 +205,7 @@ sub recvmsg {
 	}
 
 	given ($stream{$handle->fh->fileno}{state}) {
-		when ('new') {
+		when ('ingress') {	# passive
 			unless ($t eq 'Hello') {
 				AE::log error => "expected Hello message, got $t";
 				sendmsg($handle, 'Error', message => 'expected Hello message');
@@ -217,6 +221,29 @@ sub recvmsg {
 			}
 
 			&streamconnect($handle, $message);
+		}
+		when ('egress') {	# active
+			# TODO if invalid token error, then sleep and retry rather than reconnect
+			unless ($t eq 'Connected') {
+				AE::log error => "expected Connected message, got $t";
+				sendmsg($handle, 'Error', message => 'expected Connected message');
+				&streamclose($handle);
+				break;
+			}
+
+			my $ufd = (keys %map)[0];
+
+			if (defined($map{$ufd}{token})) {
+				AE::log fatal => 'mismatch of token'
+					unless ($map{$ufd}{token} eq $message->{content}{token});
+			} else {
+				$map{$ufd}{token} = $message->{content}{token};
+			}
+
+			push @{$map{$ufd}{feed}}, $handle->fh->fileno;
+			unshift @{$map{$ufd}{order}}, $handle->fh->fileno;
+
+			$stream{$handle->fh->fileno}{state} = 'member';
 		}
 		when ('member') {
 			unless ($t eq 'Data') {
@@ -325,12 +352,10 @@ sub forward {
 
 	# TODO check from expected source or use BPF
 
-	# TODO active side to open streams here
-
 	# TODO direct a<->b is sticky at the front
 
 	my $ufd = $handle->fh->fileno;
-	foreach my $fd (@{$map{$ufd}{order}}) {
+	foreach my $fd (grep { $stream{$_}{state} eq 'member' } @{$map{$ufd}{order}}) {
 		vec(my $win = '', $stream{$fd}{handle}->fh->fileno, 1) = 1;
 		if (select(undef, $win, undef, 0)) {
 			# TODO handle sequence numbers to get jitter/rtt stats
@@ -340,5 +365,64 @@ sub forward {
 
 		@{$map{$ufd}{order}} = grep { $_ != $fd } @{$map{$ufd}{order}};
 		splice @{$map{$ufd}{order}}, int(rand(length(@{$map{$ufd}{order}}))), 0, $fd;
+	}
+
+	return unless ($mode eq 'active' && keys %stream < @uri);
+
+	foreach my $u ( uniq(@uri, map { $stream{$_}{uri} } keys %stream)) {
+		my ($h, $s) = split /:([^:]+)$/, $u->authority, 2;
+		$s = '23461'
+			unless (defined($s));
+
+		tcp_connect($h, $s, sub {
+			my ($fh) = @_;
+
+			unless (defined($fh)) {
+				AE::log warn => "unable to connect: $!";
+				return;
+			}
+
+			# TODO AnyEvent::Socket->tcp_congestion
+
+			setsockopt($fh, SOL_SOCKET, SO_RCVBUF, 5*1024)
+				or AE::log warn => "unable to set SO_RCVBUF=5kB: $!";
+			setsockopt($fh, SOL_SOCKET, SO_SNDBUF, 5*1024)
+				or AE::log warn => "unable to set SO_SNDBUF=5kB: $!";
+
+			my $handle = AnyEvent::Handle->new(fh => $fh);
+			$stream{$fh->fileno} = {
+				handle	=> $handle,
+				state	=> 'egress',
+			};
+
+			$handle->on_error(sub {
+				AE::log $_[1] ? 'fatal' : 'error' => 'stream: ' . $_[2];
+				&streamclose($_[0]);
+			});
+			$handle->on_read(\&read_rbuf);
+			$handle->on_eof(sub {
+				AE::log error => 'EOF, closing';
+				&streamclose($_[0]);
+			});
+
+			$ENV{'UDPREM'} =~ RE_UDP;
+
+			my %payload = (
+				version		=> 0,
+				host		=> $+{host} || 'localhost',
+				service		=> $+{serv} || '23461',
+				rhost		=> $+{rhost} || 'localhost',
+				rservice	=> $+{rserv},
+			);
+
+			$payload{token} = $map{$ufd}{token}
+				if (defined($map{$ufd}{token}));
+
+			sendmsg($handle, 'Hello', %payload);
+		}, sub {
+			my ($fh) = @_;
+
+			5;
+		});
 	}
 }
