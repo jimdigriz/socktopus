@@ -1,8 +1,6 @@
-`socktopus` provides a high-throughput (high latency and non-guaranteed) datagram (UDP) socket between two systems over the Internet.  It does this with [multipathing](http://en.wikipedia.org/wiki/Multipath_routing) over multiple stream (TCP) sockets supporting [SOCKS](http://en.wikipedia.org/wiki/SOCKS_(protocol)) and [HTTP CONNECT](http://en.wikipedia.org/wiki/HTTP_tunnel#HTTP_CONNECT_Tunneling) proxies.
+`socktopus` provides a high-throughput (high latency and non-guaranteed) UDP datagram socket between two systems over the Internet through [multipathing](http://en.wikipedia.org/wiki/Multipath_routing).
 
-This is similar to [Multipath TCP](http://en.wikipedia.org/wiki/Multipath_TCP) which utilises multiple physical interfaces to create a faster channel, `socktopus` instead uses multiple remote relay systems making it more appropriate for WAN flows.
-
-The topology requires `socktopus` to be installed on the endpoints and a SOCKS or HTTP proxy server on a number of nodes spread across the Internet.  `socktopus` then uses these nodes to multipath a flow to its destination, relying on TCP back pressure and non-blocking writes to do the magic under the hood.
+Inspired by [Multipath TCP](http://en.wikipedia.org/wiki/Multipath_TCP) which utilises multiple physical interfaces to create a faster channel, `socktopus` instead uses TCP 'reflectors' (via [xinetd](https://azouhr.wordpress.com/2012/06/21/port-forwarding-with-xinetd/), [iptables](https://thewiringcloset.wordpress.com/2013/03/27/linux-iptable-snat-dnat/), or application proxy servers) installed on a number of relay systems spread across the Internet.  These systems are then used to multipath a flow through to its destination, relying on TCP back pressure and non-blocking writes to do the magic under the hood.
 
 Currently under development, it is being written to assist with streaming across the Internet as the author is finding out the hard way how slow the Internet is when you are trying to stream in real time over one billion HTTP access log lines a day.
 
