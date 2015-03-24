@@ -6,7 +6,12 @@ Message ::= SEQUENCE {
 	content ANY DEFINED BY type
 }
 
--- socktopusHello OBJECT IDENTIFIER ::= { socktopus 1 }
+-- socktopusError OBJECT IDENTIFIER ::= { socktopus 1 }
+Error ::= SEQUENCE {
+	message PrintableString
+}
+
+-- socktopusHello OBJECT IDENTIFIER ::= { socktopus 2 }
 Hello ::= SEQUENCE {
 	version INTEGER,
 	host IA5String,
@@ -14,11 +19,6 @@ Hello ::= SEQUENCE {
 	rhost IA5String,
 	rservice IA5String,
 	token IA5String OPTIONAL
-}
-
--- socktopusError OBJECT IDENTIFIER ::= { socktopus 2 }
-Error ::= SEQUENCE {
-	message PrintableString
 }
 
 -- socktopusConnected OBJECT IDENTIFIER ::= { socktopus 3 }
