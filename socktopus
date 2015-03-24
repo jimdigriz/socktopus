@@ -204,6 +204,11 @@ sub recvmsg {
 		return;
 	}
 
+	if ($t eq 'Error') {
+		AE::log error => 'received: ' . $message->{content}{message};
+		return;
+	}
+
 	given ($stream{$handle->fh->fileno}{state}) {
 		when ('ingress') {	# passive
 			unless ($t eq 'Hello') {
@@ -378,7 +383,13 @@ sub streamconnect {
 			LocalPort	=> $message->{content}{service},
 			PeerPort	=> $message->{content}{rservice},
 			Blocking	=> 0,
-		) or AE::log fatal => "bind: $@";
+		);
+		unless (defined($fh)) {
+			AE::log warn => "bind: $@";
+			sendmsg($handle, 'Error', message => "bind: $@");
+			&streamclose($handle);
+			return;
+		};
 
 		my $uhandle = AnyEvent::Handle::UDP->new(
 			fh		=> $fh,
