@@ -82,10 +82,7 @@ AE::log info => "running $mode";
 my ($sock, %stream, %map);
 given ($mode) {
 	when ('active') {
-		AE::log warn => 'only passing in a single URI'
-			unless (scalar(@uri) > 1);
-
-		AE::log fatal => "first URI ('$uri[0]') must be a TCP socket"
+		AE::log warn => "first URI ('$uri[0]') should be TCP"
 			unless ($uri[0]->scheme eq 'tcp');
 
 		AE::log fatal => 'env UDPREM not set correctly ([host:][serv:][rhost:]rserv)'
