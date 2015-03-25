@@ -107,7 +107,7 @@ given ($mode) {
 		my $handle = AnyEvent::Handle::UDP->new(
 			fh		=> $fh,
 			on_error	=> sub {
-				AE::log $_[1] ? 'fatal' : 'error' => $_[2];
+				AE::log warn => "udp ($_[1]): " . $_[2];
 			},
 			on_recv		=> \&forward,
 		);
@@ -121,9 +121,6 @@ given ($mode) {
 			feed	=> [ ],
 			order	=> [ ],
 		};
-
-		# disconnect to avoid fatal 'connection refused'
-		$fh->connect(pack('S n L x8', AF_UNSPEC, 0, 0));
 	}
 	when ('passive') {
 		my $serv = $ENV{'SERVICE'} || '[::]:23461';
@@ -147,7 +144,7 @@ given ($mode) {
 			};
 
 			$handle->on_error(sub {
-				AE::log $_[1] ? 'fatal' : 'error' => 'stream: ' . $_[2];
+				AE::log warn => "stream ($_[1]): " . $_[2];
 				&streamclose($_[0]);
 			});
 			$handle->on_read(\&read_rbuf);
@@ -289,8 +286,6 @@ sub recvmsg {
 sub forward {
 	my ($data, $handle, $src) = @_;
 
-	# TODO check from expected source or use BPF
-
 	my $ufd = $handle->fh->fileno;
 	my @order = grep { $stream{$_}{state} eq 'member' } @{$map{$ufd}{order}};
 	unshift @order, $map{$ufd}{primary}
@@ -346,7 +341,7 @@ sub streamopen {
 		};
 
 		$handle->on_error(sub {
-			AE::log $_[1] ? 'fatal' : 'error' => 'stream: ' . $_[2];
+			AE::log warn => "stream ($_[1]): " . $_[2];
 			&streamclose($_[0]);
 		});
 		$handle->on_read(\&read_rbuf);
@@ -423,7 +418,7 @@ sub streamconnect {
 		my $uhandle = AnyEvent::Handle::UDP->new(
 			fh		=> $fh,
 			on_error	=> sub {
-				AE::log $_[1] ? 'fatal' : 'error' => $_[2];
+				AE::log warn => "udp ($_[1]): " . $_[2];
 			},
 			on_recv		=> \&forward,
 		);
@@ -446,8 +441,6 @@ sub streamconnect {
 		} else {
 			$map{$ufd}{primary} = $handle->fh->fileno;
 		}
-
-		$fh->connect(pack('S n L x8', AF_UNSPEC, 0, 0));
 	}
 
 	sendmsg($handle, 'Connected', token => $map{$ufd}{token});
