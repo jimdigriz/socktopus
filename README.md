@@ -73,8 +73,8 @@ For the non-`tcp` schemes, the application proxy will be asked to connect to the
 # Testing
 
  1. in two terminals, run the example usage commands as given above
- 1. open a third terminal and run: `sudo tcpdump -i lo -n -p -X portrange 1234-1236 or port 23461`
- 1. open a fourth terminal and run: `{ printf 'hello'; sleep 1; } | nc -q0 -u 127.0.0.1 23461`
+ 1. open a third terminal and run: `sudo tcpdump -i lo -n -p -X portrange 1234-1236 or port 23461 or icmp`
+ 1. open a fourth terminal and run: `{ printf 'hello'; sleep 1; } | nc -q0 -u -p 1234 127.0.0.1 23461`
  1. you should see your `tcpdump` terminal flicker with some TCP activity
  1. you will see though the UDP being consumed but not re-admitted at the other end, this is because the connection is triggered to be established, but is not yet in a state were packet forwarding works
  1. re-run the last command (`nc` one liner) again and this time you should see your UDP packet emitted from the other end
