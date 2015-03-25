@@ -81,7 +81,7 @@ foreach my $a (@ARGV) {
 my $mode = (scalar(@uri)) ? 'active' : 'passive';
 AE::log info => "running $mode";
 
-my (%stream, %map);
+my (%inprogress, %stream, %map);
 given ($mode) {
 	when ('active') {
 		AE::log warn => "first URI ('$uri[0]') should be TCP"
@@ -306,7 +306,7 @@ sub forward {
 	sendmsg($stream{$cts[0]}{handle}, 'Data', sequence => { global => -1, local => -1 }, payload => $data)
 		if (@cts);
 
-	return unless ($mode eq 'active' && keys %stream < @uri);
+	return unless ($mode eq 'active' && scalar(keys %stream) + scalar(keys %inprogress) < @uri);
 
 	&streamopen($ufd, $_)
 		foreach (uniq(@uri, map { $stream{$_}{uri} } keys %stream));
@@ -315,12 +315,16 @@ sub forward {
 sub streamopen {
 	my ($ufd, $luri) = @_;
 
+	$inprogress{$luri} = 1;
+
 	my ($h, $s) = split /:([^:]+)$/, $luri->authority, 2;
 	$s = '23461'
 		unless (defined($s));
 
 	tcp_connect($h, $s, sub {
 		my ($fh) = @_;
+
+		delete $inprogress{$luri};
 
 		unless (defined($fh)) {
 			AE::log warn => "unable to connect: $!";
