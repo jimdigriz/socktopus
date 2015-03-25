@@ -296,6 +296,7 @@ sub forward {
 	unshift @order, $map{$ufd}{primary}
 		unless ($map{$ufd}{primary} == -1);
 	foreach my $fd (@order) {
+		# TODO reduce buffer underuns (can we just test the length of wbuf?)
 		vec(my $win = '', $stream{$fd}{handle}->fh->fileno, 1) = 1;
 		if (select(undef, $win, undef, 0)) {
 			# TODO handle sequence numbers to get jitter/rtt stats
