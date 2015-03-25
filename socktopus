@@ -18,6 +18,7 @@ use Carp;
 use POSIX qw(strftime);
 use Socket qw(SOL_SOCKET SO_RCVBUF SO_SNDBUF);
 use List::MoreUtils qw(uniq);
+use List::Util qw(shuffle);
 
 use Data::Dumper;
 
@@ -140,6 +141,7 @@ given ($mode) {
 			my $handle = AnyEvent::Handle->new(fh => $fh);
 			$stream{$fh->fileno} = {
 				handle	=> $handle,
+				cts	=> 1,
 				state	=> 'ingress',
 			};
 
@@ -148,6 +150,9 @@ given ($mode) {
 				&streamclose($_[0]);
 			});
 			$handle->on_read(\&read_rbuf);
+			$handle->on_drain(sub {
+				$stream{$_[0]->fh->fileno}{cts} = 1;
+			});
 			$handle->on_eof(sub {
 				AE::log error => 'EOF, closing';
 				&streamclose($_[0]);
@@ -187,6 +192,7 @@ sub sendmsg {
 	AE::log fatal => "unable to create '$type' Message"
 		unless (defined($m));
 
+	$stream{$handle->fh->fileno}{cts} = 0;
 	$handle->push_write($m);
 }
 
@@ -287,23 +293,18 @@ sub forward {
 	my ($data, $handle, $src) = @_;
 
 	my $ufd = $handle->fh->fileno;
-	my @order = grep { $stream{$_}{state} eq 'member' } @{$map{$ufd}{order}};
-	unshift @order, $map{$ufd}{primary}
-		unless ($map{$ufd}{primary} == -1);
-	foreach my $fd (@order) {
-		# TODO reduce buffer underuns (can we just test the length of wbuf?)
-		vec(my $win = '', $stream{$fd}{handle}->fh->fileno, 1) = 1;
-		if (select(undef, $win, undef, 0)) {
-			# TODO handle sequence numbers to get jitter/rtt stats
-			sendmsg($stream{$fd}{handle}, 'Data', sequence => { global => -1, local => -1 }, payload => $data);
-			last;
-		}
 
-		next if ($fd == $map{$ufd}{primary});
+	my @members = grep { $stream{$_}{state} eq 'member' } @{$map{$ufd}{order}};
+	my @cts = grep { $stream{$_}{cts} == 1 } @members;
+	my @ncts = grep { $stream{$_}{cts} == 0 } @members;
 
-		@{$map{$ufd}{order}} = grep { $_ != $fd } @{$map{$ufd}{order}};
-		splice @{$map{$ufd}{order}}, int(rand(length(@{$map{$ufd}{order}}))), 0, $fd;
-	}
+	$map{$ufd}{order} = [ @cts, shuffle @ncts ];
+
+	unshift @cts, $map{$ufd}{primary}
+		if ($map{$ufd}{primary} != -1 && $stream{$map{$ufd}{primary}}{cts} == 1);
+
+	sendmsg($stream{$cts[0]}{handle}, 'Data', sequence => { global => -1, local => -1 }, payload => $data)
+		if (@cts);
 
 	return unless ($mode eq 'active' && keys %stream < @uri);
 
@@ -336,6 +337,7 @@ sub streamopen {
 		my $handle = AnyEvent::Handle->new(fh => $fh);
 		$stream{$fh->fileno} = {
 			handle	=> $handle,
+			cts	=> 1,
 			state	=> 'egress',
 			primary	=> ($luri eq $uri[0]),
 		};
@@ -345,6 +347,9 @@ sub streamopen {
 			&streamclose($_[0]);
 		});
 		$handle->on_read(\&read_rbuf);
+		$handle->on_drain(sub {
+			$stream{$_[0]->fh->fileno}{cts} = 1;
+		});
 		$handle->on_eof(sub {
 			AE::log error => 'EOF, closing';
 			&streamclose($_[0]);
