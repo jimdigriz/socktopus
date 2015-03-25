@@ -42,16 +42,16 @@ Listener (passive) end that receives connections:
 
     env AE_LOG=main=+log SERVICE=23461 ./socktopus
 
-Notes of interest:
+## Notes
 
- - logging is controlled by the environment variable [`AE_LOG`](http://pod.tst.eu/http://cvs.schmorp.de/AnyEvent/lib/AnyEvent/Log.pm#CONFIGURATION_VIA_ENV_PERL_ANYEVENT_)
- - if no arguments are present, the process goes into listener mode
- - arguments are URIs
- - the first URI is the destination host you are connecting to and *must* be a `tcp` URI
- - `SERVICE` is the TCP listening socket, takes the syntax `[host:][serv]` where `host` defaults to `[::]` and `serv` to `23461`
- - `UDP{LOC,REM}` take the syntax `[host:][serv:][rhost:]rserv`, where `(r)host` defaults to `localhost` and `serv` defaults to `23461`
- - `UDPLOC` describes the local source host/port and destination host/port tuple
- - `UDPREM` describes the remote source host/port and destination host/port tuple
+ * logging is controlled by the environment variable [`AE_LOG`](http://pod.tst.eu/http://cvs.schmorp.de/AnyEvent/lib/AnyEvent/Log.pm#CONFIGURATION_VIA_ENV_PERL_ANYEVENT_)
+ * if no arguments are present, the process goes into listener mode
+ * arguments are URIs
+ * the first URI is the destination host you are connecting to (the partner system running `socktopus`) and *must* be a `tcp` URI
+ * `SERVICE` is the TCP listening socket, takes the syntax `[host:][serv]` where `host` defaults to `[::]` and `serv` to `23461`
+ * `UDP{LOC,REM}` take the syntax `[host:][serv:][rhost:]rserv`, where `(r)host` defaults to `localhost` and `serv` defaults to `23461`
+ * `UDPLOC` describes the local source host/port and destination host/port tuple
+ * `UDPREM` describes the remote source host/port and destination host/port tuple
 
 One use case for the UDP data channel created is to run [VTun](http://vtun.sourceforge.net/) providing you with a high-throughput network interface.
 
@@ -69,3 +69,12 @@ The following URI schemes are supported:
  * **`http` (default port: 8080) [not supported]:** HTTP proxy that supports the [CONNECT method](http://en.wikipedia.org/wiki/HTTP_tunnel#HTTP_CONNECT_Tunneling)
 
 For the non-`tcp` schemes, the application proxy will be asked to connect to the target system in the first argument.
+
+# Testing
+
+ 1. in two terminals, run the example usage commands as given above
+ 1. open a third terminal and run: `sudo tcpdump -i lo -n -p -X portrange 1234-1236 or port 23461`
+ 1. open a fourth terminal and run: `{ printf 'hello'; sleep 1; } | nc -q0 -u 127.0.0.1 23461`
+ 1. you should see your `tcpdump` terminal flicker with some TCP activity
+ 1. you will see though the UDP being consumed but not re-admitted at the other end, this is because the connection is triggered to be established, but is not yet in a state were packet forwarding works
+ 1. re-run the last command (`nc` one liner) again and this time you should see your UDP packet emitted from the other end
