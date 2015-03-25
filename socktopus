@@ -117,6 +117,7 @@ given ($mode) {
 			tuple	=> join(' ', $host, $serv, $rhost, $+{rserv}),
 			rhost	=> $fh->peerhost,
 			rserv	=> $fh->peerport,
+			primary	=> -1,
 			feed	=> [ ],
 			order	=> [ ],
 		};
@@ -246,7 +247,19 @@ sub recvmsg {
 			}
 
 			push @{$map{$ufd}{feed}}, $handle->fh->fileno;
-			unshift @{$map{$ufd}{order}}, $handle->fh->fileno;
+
+			if ($stream{$handle->fh->fileno}{primary} == 0) {
+				unshift @{$map{$ufd}{order}}, $handle->fh->fileno;
+			} else {
+				unless ($map{$ufd}{primary} == -1) {
+					AE::log error => 'primary already set';
+					sendmsg($handle, 'Error', message => 'primary already set');
+					&streamclose($handle);
+					return;
+				}
+
+				$map{$ufd}{primary} = $handle->fh->fileno;
+			}
 
 			$stream{$handle->fh->fileno}{state} = 'member';
 		}
@@ -278,16 +291,19 @@ sub forward {
 
 	# TODO check from expected source or use BPF
 
-	# TODO direct a<->b is sticky at the front
-
 	my $ufd = $handle->fh->fileno;
-	foreach my $fd (grep { $stream{$_}{state} eq 'member' } @{$map{$ufd}{order}}) {
+	my @order = grep { $stream{$_}{state} eq 'member' } @{$map{$ufd}{order}};
+	unshift @order, $map{$ufd}{primary}
+		unless ($map{$ufd}{primary} == -1);
+	foreach my $fd (@order) {
 		vec(my $win = '', $stream{$fd}{handle}->fh->fileno, 1) = 1;
 		if (select(undef, $win, undef, 0)) {
 			# TODO handle sequence numbers to get jitter/rtt stats
 			sendmsg($stream{$fd}{handle}, 'Data', sequence => { global => -1, local => -1 }, payload => $data);
 			last;
 		}
+
+		next if ($fd == $map{$ufd}{primary});
 
 		@{$map{$ufd}{order}} = grep { $_ != $fd } @{$map{$ufd}{order}};
 		splice @{$map{$ufd}{order}}, int(rand(length(@{$map{$ufd}{order}}))), 0, $fd;
@@ -300,9 +316,9 @@ sub forward {
 }
 
 sub streamopen {
-	my ($ufd, $uri) = @_;
+	my ($ufd, $luri) = @_;
 
-	my ($h, $s) = split /:([^:]+)$/, $uri->authority, 2;
+	my ($h, $s) = split /:([^:]+)$/, $luri->authority, 2;
 	$s = '23461'
 		unless (defined($s));
 
@@ -325,6 +341,7 @@ sub streamopen {
 		$stream{$fh->fileno} = {
 			handle	=> $handle,
 			state	=> 'egress',
+			primary	=> ($luri eq $uri[0]),
 		};
 
 		$handle->on_error(sub {
@@ -341,6 +358,7 @@ sub streamopen {
 
 		my %payload = (
 			version		=> 0,
+			primary		=> ($luri eq $uri[0]),
 			host		=> $+{host} || 'localhost',
 			service		=> $+{serv} || '23461',
 			rhost		=> $+{rhost} || 'localhost',
@@ -372,7 +390,19 @@ sub streamconnect {
 		}
 
 		push @{$map{$ufd}{feed}}, $handle->fh->fileno;
-		unshift @{$map{$ufd}{order}}, $handle->fh->fileno;
+
+		if ($message->{content}{primary} == 0) {
+			unshift @{$map{$ufd}{order}}, $handle->fh->fileno;
+		} else {
+			unless ($map{$ufd}{primary} == -1) {
+				AE::log error => 'primary already set';
+				sendmsg($handle, 'Error', message => 'primary already set');
+				&streamclose($handle);
+				return;
+			}
+
+			$map{$ufd}{primary} = $handle->fh->fileno;
+		}
 	} else {
 		my $fh = IO::Socket::INET->new(
 			LocalHost	=> $message->{content}{host},
@@ -405,9 +435,16 @@ sub streamconnect {
 			rhost	=> $fh->peerhost,
 			rserv	=> $fh->peerport,
 			token	=> guid_string,
+			primary	=> -1,
 			feed	=> [ $handle->fh->fileno ],
-			order	=> [ $handle->fh->fileno ],
+			order	=> [ ],
 		};
+
+		if ($message->{content}{primary} == 0) {
+			unshift @{$map{$ufd}{order}}, $handle->fh->fileno;
+		} else {
+			$map{$ufd}{primary} = $handle->fh->fileno;
+		}
 
 		$fh->connect(pack('S n L x8', AF_UNSPEC, 0, 0));
 	}
@@ -431,7 +468,10 @@ sub streamclose {
 	return unless (defined($ufd));
 
 	@{$map{$ufd}{feed}} = grep { $_ != $sfd } @{$map{$ufd}{feed}};
+
 	@{$map{$ufd}{order}} = grep { $_ != $sfd } @{$map{$ufd}{order}};
+	$map{$ufd}{primary} = -1
+		if ($map{$ufd}{primary} == $sfd);
 
 	return if (@{$map{$ufd}{feed}});
 
