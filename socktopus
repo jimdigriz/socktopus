@@ -300,8 +300,9 @@ sub forward {
 
 	$map{$ufd}{order} = [ @cts, shuffle @ncts ];
 
-	unshift @cts, $map{$ufd}{primary}
-		if ($map{$ufd}{primary} != -1 && $stream{$map{$ufd}{primary}}{cts} == 1);
+	my $p = $map{$ufd}{primary};
+	unshift @cts, $p
+		if ($p != -1 && $stream{$p}{state} eq 'member' && $stream{$p}{cts} == 1);
 
 	sendmsg($stream{$cts[0]}{handle}, 'Data', sequence => { global => -1, local => -1 }, payload => $data)
 		if (@cts);
